@@ -142,8 +142,63 @@ jobs:
           if [ -z "$ALLOWED_ORIGINS" ]; then
             ALLOWED_ORIGINS='["*"]'
           fi
-          echo "allowed_origins=$ALLOWED_ORIGINS" >> $GITHUB_OUTPUT
-          echo "✅ Allowed Origins: $ALLOWED_ORIGINS"
+          
+          # Create parameters JSON file
+          cat > /tmp/stack-parameters.json <<EOF
+          [
+            {
+              "ParameterKey": "Environment",
+              "ParameterValue": "production"
+            },
+            {
+              "ParameterKey": "InstanceType",
+              "ParameterValue": "t2.micro"
+            },
+            {
+              "ParameterKey": "KeyPairName",
+              "ParameterValue": "${{ secrets.EC2_KEY_PAIR_NAME }}"
+            },
+            {
+              "ParameterKey": "DatabaseURL",
+              "ParameterValue": "${{ secrets.DATABASE_URL }}"
+            },
+            {
+              "ParameterKey": "AWSAccessKeyId",
+              "ParameterValue": "${{ secrets.AWS_ACCESS_KEY_ID }}"
+            },
+            {
+              "ParameterKey": "AWSSecretAccessKey",
+              "ParameterValue": "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
+            },
+            {
+              "ParameterKey": "AllowedOrigins",
+              "ParameterValue": "$ALLOWED_ORIGINS"
+            },
+            {
+              "ParameterKey": "MinSize",
+              "ParameterValue": "1"
+            },
+            {
+              "ParameterKey": "MaxSize",
+              "ParameterValue": "4"
+            },
+            {
+              "ParameterKey": "DesiredCapacity",
+              "ParameterValue": "1"
+            },
+            {
+              "ParameterKey": "VpcId",
+              "ParameterValue": "${{ steps.get-vpc.outputs.vpc_id }}"
+            },
+            {
+              "ParameterKey": "SubnetIds",
+              "ParameterValue": "${{ steps.get-vpc.outputs.subnet_ids }}"
+            }
+          ]
+          EOF
+          
+          echo "✅ Parameters prepared"
+          cat /tmp/stack-parameters.json
 
       - name: Deploy CloudFormation Stack
         run: |
@@ -151,24 +206,12 @@ jobs:
           NEEDS_CREATION="${{ steps.delete-stack.outputs.needs_creation }}"
           
           if [[ "$STACK_EXISTS" == "false" ]] || [[ "$NEEDS_CREATION" == "true" ]]; then
-            echo "🚀 Creating new CloudFormation stack: ${{ env.STACK_NAME }}"
+            echo "� Creating new CloudFormation stack: ${{ env.STACK_NAME }}"
             
             aws cloudformation create-stack \
               --stack-name ${{ env.STACK_NAME }} \
               --template-body file://cloudformation/infrastructure-default-vpc.yaml \
-              --parameters \
-                ParameterKey=Environment,ParameterValue=production \
-                ParameterKey=InstanceType,ParameterValue=t2.micro \
-                ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
-                ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
-                ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-                ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-                ParameterKey=AllowedOrigins,ParameterValue="${{ steps.prepare-params.outputs.allowed_origins }}" \
-                ParameterKey=MinSize,ParameterValue=1 \
-                ParameterKey=MaxSize,ParameterValue=4 \
-                ParameterKey=DesiredCapacity,ParameterValue=1 \
-                ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc_id }} \
-                ParameterKey=SubnetIds,ParameterValue="${{ steps.get-vpc.outputs.subnet_ids }}" \
+              --parameters file:///tmp/stack-parameters.json \
               --capabilities CAPABILITY_NAMED_IAM \
               --tags \
                 Key=Project,Value=BedrockBackend \
@@ -187,19 +230,7 @@ jobs:
             aws cloudformation update-stack \
               --stack-name ${{ env.STACK_NAME }} \
               --template-body file://cloudformation/infrastructure-default-vpc.yaml \
-              --parameters \
-                ParameterKey=Environment,ParameterValue=production \
-                ParameterKey=InstanceType,ParameterValue=t2.micro \
-                ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
-                ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
-                ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-                ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-                ParameterKey=AllowedOrigins,ParameterValue="${{ steps.prepare-params.outputs.allowed_origins }}" \
-                ParameterKey=MinSize,ParameterValue=1 \
-                ParameterKey=MaxSize,ParameterValue=4 \
-                ParameterKey=DesiredCapacity,ParameterValue=1 \
-                ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc_id }} \
-                ParameterKey=SubnetIds,ParameterValue="${{ steps.get-vpc.outputs.subnet_ids }}" \
+              --parameters file:///tmp/stack-parameters.json \
               --capabilities CAPABILITY_NAMED_IAM || echo "No updates to perform"
             
             echo "⏳ Waiting for stack update to complete..."
