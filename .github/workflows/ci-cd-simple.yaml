@@ -65,7 +65,7 @@ jobs:
         id: check-stack
         run: |
           echo "🔍 Checking if stack exists..."
-          
+
           if aws cloudformation describe-stacks --stack-name ${{ env.STACK_NAME }} 2>/dev/null; then
             STACK_STATUS=$(aws cloudformation describe-stacks \
               --stack-name ${{ env.STACK_NAME }} \
@@ -84,7 +84,7 @@ jobs:
         if: steps.check-stack.outputs.stack_exists == 'true'
         run: |
           STACK_STATUS="${{ steps.check-stack.outputs.stack_status }}"
-          
+
           # Only delete if stack is in a failed/rollback state that can't be updated
           if [[ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]] || [[ "$STACK_STATUS" == *"FAILED"* ]]; then
             echo "🗑️ Deleting failed stack: ${{ env.STACK_NAME }}"
@@ -108,7 +108,7 @@ jobs:
         id: get-vpc
         run: |
           echo "🔍 Getting default VPC and subnets..."
-          
+
           # Get default VPC
           VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=isDefault,Values=true" \
@@ -142,7 +142,7 @@ jobs:
           if [ -z "$ALLOWED_ORIGINS" ]; then
             ALLOWED_ORIGINS='["*"]'
           fi
-          
+
           # Create parameters JSON file using jq for proper escaping
           jq -n \
             --arg env "production" \
@@ -168,7 +168,7 @@ jobs:
               {ParameterKey: "VpcId", ParameterValue: $vpc},
               {ParameterKey: "SubnetIds", ParameterValue: $subnets}
             ]' > /tmp/stack-parameters.json
-          
+
           echo "✅ Parameters prepared"
           cat /tmp/stack-parameters.json
 
@@ -176,7 +176,7 @@ jobs:
         run: |
           STACK_EXISTS="${{ steps.check-stack.outputs.stack_exists }}"
           NEEDS_CREATION="${{ steps.delete-stack.outputs.needs_creation }}"
-          
+
           if [[ "$STACK_EXISTS" == "false" ]] || [[ "$NEEDS_CREATION" == "true" ]]; then
             echo "� Creating new CloudFormation stack: ${{ env.STACK_NAME }}"
             

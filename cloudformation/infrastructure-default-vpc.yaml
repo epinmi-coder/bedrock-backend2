@@ -13,10 +13,6 @@ Parameters:
     AllowedValues:
       - t2.micro
       - t2.small
-      - t2.medium
-      - t3.micro
-      - t3.small
-      - t3.medium
     Description: EC2 instance type
 
   KeyPairName:
