@@ -80,27 +80,29 @@ jobs:
             echo "📦 Stack does not exist"
           fi
 
-      - name: Delete failed or existing stack
+      - name: Delete failed stack if needed
         if: steps.check-stack.outputs.stack_exists == 'true'
         run: |
           STACK_STATUS="${{ steps.check-stack.outputs.stack_status }}"
           
-          echo "🗑️ Deleting existing stack: ${{ env.STACK_NAME }}"
-          echo "Current status: $STACK_STATUS"
-          
-          # If stack is in ROLLBACK_COMPLETE or failed state, we must delete it
+          # Only delete if stack is in a failed/rollback state that can't be updated
           if [[ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]] || [[ "$STACK_STATUS" == *"FAILED"* ]]; then
+            echo "🗑️ Deleting failed stack: ${{ env.STACK_NAME }}"
             echo "⚠️ Stack is in $STACK_STATUS state - deletion required"
+            
+            aws cloudformation delete-stack --stack-name ${{ env.STACK_NAME }}
+            
+            echo "⏳ Waiting for stack deletion to complete..."
+            aws cloudformation wait stack-delete-complete \
+              --stack-name ${{ env.STACK_NAME }} || true
+            
+            echo "✅ Stack deleted successfully"
+            echo "needs_creation=true" >> $GITHUB_OUTPUT
+          else
+            echo "✅ Stack exists in $STACK_STATUS state - will update instead of recreate"
+            echo "needs_creation=false" >> $GITHUB_OUTPUT
           fi
-          
-          # Delete the stack
-          aws cloudformation delete-stack --stack-name ${{ env.STACK_NAME }}
-          
-          echo "⏳ Waiting for stack deletion to complete..."
-          aws cloudformation wait stack-delete-complete \
-            --stack-name ${{ env.STACK_NAME }} || true
-          
-          echo "✅ Stack deleted successfully"
+        id: delete-stack
 
       - name: Get Default VPC and Subnets
         id: get-vpc
@@ -143,38 +145,69 @@ jobs:
           echo "allowed_origins=$ALLOWED_ORIGINS" >> $GITHUB_OUTPUT
           echo "✅ Allowed Origins: $ALLOWED_ORIGINS"
 
-      - name: Create CloudFormation Stack
+      - name: Deploy CloudFormation Stack
         run: |
-          echo "🚀 Creating CloudFormation stack: ${{ env.STACK_NAME }}"
+          STACK_EXISTS="${{ steps.check-stack.outputs.stack_exists }}"
+          NEEDS_CREATION="${{ steps.delete-stack.outputs.needs_creation }}"
           
-          aws cloudformation create-stack \
-            --stack-name ${{ env.STACK_NAME }} \
-            --template-body file://cloudformation/infrastructure-default-vpc.yaml \
-            --parameters \
-              ParameterKey=Environment,ParameterValue=production \
-              ParameterKey=InstanceType,ParameterValue=t2.micro \
-              ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
-              ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
-              ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-              ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-              ParameterKey=AllowedOrigins,ParameterValue="${{ steps.prepare-params.outputs.allowed_origins }}" \
-              ParameterKey=MinSize,ParameterValue=1 \
-              ParameterKey=MaxSize,ParameterValue=4 \
-              ParameterKey=DesiredCapacity,ParameterValue=1 \
-              ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc_id }} \
-              ParameterKey=SubnetIds,ParameterValue="${{ steps.get-vpc.outputs.subnet_ids }}" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --tags \
-              Key=Project,Value=BedrockBackend \
-              Key=Environment,Value=production \
-              Key=ManagedBy,Value=CloudFormation \
-              Key=DeployedBy,Value=GitHubActions
-          
-          echo "⏳ Waiting for stack creation to complete (this may take 5-10 minutes)..."
-          aws cloudformation wait stack-create-complete \
-            --stack-name ${{ env.STACK_NAME }}
-          
-          echo "✅ Stack created successfully"
+          if [[ "$STACK_EXISTS" == "false" ]] || [[ "$NEEDS_CREATION" == "true" ]]; then
+            echo "🚀 Creating new CloudFormation stack: ${{ env.STACK_NAME }}"
+            
+            aws cloudformation create-stack \
+              --stack-name ${{ env.STACK_NAME }} \
+              --template-body file://cloudformation/infrastructure-default-vpc.yaml \
+              --parameters \
+                ParameterKey=Environment,ParameterValue=production \
+                ParameterKey=InstanceType,ParameterValue=t2.micro \
+                ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
+                ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
+                ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+                ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+                ParameterKey=AllowedOrigins,ParameterValue="${{ steps.prepare-params.outputs.allowed_origins }}" \
+                ParameterKey=MinSize,ParameterValue=1 \
+                ParameterKey=MaxSize,ParameterValue=4 \
+                ParameterKey=DesiredCapacity,ParameterValue=1 \
+                ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc_id }} \
+                ParameterKey=SubnetIds,ParameterValue="${{ steps.get-vpc.outputs.subnet_ids }}" \
+              --capabilities CAPABILITY_NAMED_IAM \
+              --tags \
+                Key=Project,Value=BedrockBackend \
+                Key=Environment,Value=production \
+                Key=ManagedBy,Value=CloudFormation \
+                Key=DeployedBy,Value=GitHubActions
+            
+            echo "⏳ Waiting for stack creation to complete (this may take 5-10 minutes)..."
+            aws cloudformation wait stack-create-complete \
+              --stack-name ${{ env.STACK_NAME }}
+            
+            echo "✅ Stack created successfully"
+          else
+            echo "🔄 Updating existing CloudFormation stack: ${{ env.STACK_NAME }}"
+            
+            aws cloudformation update-stack \
+              --stack-name ${{ env.STACK_NAME }} \
+              --template-body file://cloudformation/infrastructure-default-vpc.yaml \
+              --parameters \
+                ParameterKey=Environment,ParameterValue=production \
+                ParameterKey=InstanceType,ParameterValue=t2.micro \
+                ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
+                ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
+                ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+                ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+                ParameterKey=AllowedOrigins,ParameterValue="${{ steps.prepare-params.outputs.allowed_origins }}" \
+                ParameterKey=MinSize,ParameterValue=1 \
+                ParameterKey=MaxSize,ParameterValue=4 \
+                ParameterKey=DesiredCapacity,ParameterValue=1 \
+                ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc_id }} \
+                ParameterKey=SubnetIds,ParameterValue="${{ steps.get-vpc.outputs.subnet_ids }}" \
+              --capabilities CAPABILITY_NAMED_IAM || echo "No updates to perform"
+            
+            echo "⏳ Waiting for stack update to complete..."
+            aws cloudformation wait stack-update-complete \
+              --stack-name ${{ env.STACK_NAME }} || echo "Update completed or no changes"
+            
+            echo "✅ Stack updated successfully"
+          fi
 
       - name: Get Stack Outputs
         id: stack-outputs
