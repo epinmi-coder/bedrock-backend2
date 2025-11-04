@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-west-2
+  AWS_REGION: us-east-1
   STACK_NAME: bedrock-backend-stack
 
 jobs:
@@ -24,8 +24,8 @@ jobs:
         run: |
           echo "Deleting stack: ${{ env.STACK_NAME }}"
           aws cloudformation delete-stack --stack-name ${{ env.STACK_NAME }}
-          
+
           echo "Waiting for stack deletion to complete..."
           aws cloudformation wait stack-delete-complete --stack-name ${{ env.STACK_NAME }} || true
-          
+
           echo "✅ Stack deleted successfully"
