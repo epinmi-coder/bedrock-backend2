@@ -150,32 +150,6 @@ jobs:
           echo "instance_ids=$INSTANCE_IDS" >> $GITHUB_OUTPUT
           echo "✅ Found instances: $INSTANCE_IDS"
 
-      - name: Create deployment package
-        run: |
-          echo "Creating deployment archive..."
-          tar -czf app.tar.gz \
-            --exclude='.git' \
-            --exclude='.github' \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            --exclude='.env' \
-            --exclude='venv' \
-            --exclude='node_modules' \
-            --exclude='.pytest_cache' \
-            --exclude='cloudformation' \
-            --exclude='scripts' \
-            --exclude='*.md' \
-            .
-
-          # Convert to base64 for SSM transmission
-          base64 app.tar.gz > app.tar.gz.b64
-
-          # Split into chunks if needed (SSM has size limits)
-          split -b 30000 app.tar.gz.b64 chunk_
-
-          echo "✅ Deployment package created"
-          ls -lh app.tar.gz
-
       - name: Deploy to EC2 instances
         run: |
           INSTANCE_IDS="${{ steps.get-instances.outputs.instance_ids }}"
