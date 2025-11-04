@@ -405,16 +405,33 @@ jobs:
   notify:
     name: Notify
     runs-on: ubuntu-latest
-    needs: [deploy-infrastructure, verify]
+    needs: [deploy-infrastructure, deploy-application, verify]
     if: always()
 
     steps:
       - name: Deployment Status
         run: |
           ALB_URL="${{ needs.deploy-infrastructure.outputs.alb_url }}"
+          INFRA_RESULT="${{ needs.deploy-infrastructure.result }}"
+          APP_RESULT="${{ needs.deploy-application.result }}"
+          VERIFY_RESULT="${{ needs.verify.result }}"
 
-          if [ "${{ needs.verify.result }}" = "success" ]; then
+          echo "Job Results:"
+          echo "  Infrastructure: $INFRA_RESULT"
+          echo "  Application: $APP_RESULT"
+          echo "  Verification: $VERIFY_RESULT"
+          echo ""
+
+          if [ "$VERIFY_RESULT" = "success" ]; then
             echo "✅ Deployment completed successfully!"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🌐 Application URL: $ALB_URL"
+            echo "❤️  Health Check: $ALB_URL/health"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          elif [ "$INFRA_RESULT" = "success" ] && [ "$APP_RESULT" = "skipped" ]; then
+            echo "⚠️ Infrastructure deployed but application deployment skipped"
+            echo "This usually means the stack was updated but no EC2 changes were needed"
             echo ""
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             echo "🌐 Application URL: $ALB_URL"
@@ -422,5 +439,6 @@ jobs:
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           else
             echo "❌ Deployment failed!"
+            echo "Check the logs above for details"
             exit 1
           fi
