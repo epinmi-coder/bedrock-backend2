@@ -403,16 +403,6 @@ jobs:
           ---
           *Deployed by GitHub Actions - Commit: ${{ github.sha }}*
           EOF
-
-  notify:
-    name: Send Notifications
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: always()
-    steps:
-      - name: Send Slack notification
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
-        uses: slackapi/slack-github-action@v1.25.0
         with:
           payload: |
             {
