@@ -137,65 +137,37 @@ jobs:
       - name: Prepare parameters
         id: prepare-params
         run: |
-          # Handle AllowedOrigins - ensure it's a string
+          # Handle AllowedOrigins - ensure it's a JSON string
           ALLOWED_ORIGINS='${{ secrets.ALLOWED_ORIGINS }}'
           if [ -z "$ALLOWED_ORIGINS" ]; then
             ALLOWED_ORIGINS='["*"]'
           fi
           
-          # Create parameters JSON file
-          cat > /tmp/stack-parameters.json <<EOF
-          [
-            {
-              "ParameterKey": "Environment",
-              "ParameterValue": "production"
-            },
-            {
-              "ParameterKey": "InstanceType",
-              "ParameterValue": "t2.micro"
-            },
-            {
-              "ParameterKey": "KeyPairName",
-              "ParameterValue": "${{ secrets.EC2_KEY_PAIR_NAME }}"
-            },
-            {
-              "ParameterKey": "DatabaseURL",
-              "ParameterValue": "${{ secrets.DATABASE_URL }}"
-            },
-            {
-              "ParameterKey": "AWSAccessKeyId",
-              "ParameterValue": "${{ secrets.AWS_ACCESS_KEY_ID }}"
-            },
-            {
-              "ParameterKey": "AWSSecretAccessKey",
-              "ParameterValue": "${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-            },
-            {
-              "ParameterKey": "AllowedOrigins",
-              "ParameterValue": "$ALLOWED_ORIGINS"
-            },
-            {
-              "ParameterKey": "MinSize",
-              "ParameterValue": "1"
-            },
-            {
-              "ParameterKey": "MaxSize",
-              "ParameterValue": "4"
-            },
-            {
-              "ParameterKey": "DesiredCapacity",
-              "ParameterValue": "1"
-            },
-            {
-              "ParameterKey": "VpcId",
-              "ParameterValue": "${{ steps.get-vpc.outputs.vpc_id }}"
-            },
-            {
-              "ParameterKey": "SubnetIds",
-              "ParameterValue": "${{ steps.get-vpc.outputs.subnet_ids }}"
-            }
-          ]
-          EOF
+          # Create parameters JSON file using jq for proper escaping
+          jq -n \
+            --arg env "production" \
+            --arg instance "t2.micro" \
+            --arg keypair "${{ secrets.EC2_KEY_PAIR_NAME }}" \
+            --arg dburl "${{ secrets.DATABASE_URL }}" \
+            --arg awskey "${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            --arg awssecret "${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            --arg origins "$ALLOWED_ORIGINS" \
+            --arg vpc "${{ steps.get-vpc.outputs.vpc_id }}" \
+            --arg subnets "${{ steps.get-vpc.outputs.subnet_ids }}" \
+            '[
+              {ParameterKey: "Environment", ParameterValue: $env},
+              {ParameterKey: "InstanceType", ParameterValue: $instance},
+              {ParameterKey: "KeyPairName", ParameterValue: $keypair},
+              {ParameterKey: "DatabaseURL", ParameterValue: $dburl},
+              {ParameterKey: "AWSAccessKeyId", ParameterValue: $awskey},
+              {ParameterKey: "AWSSecretAccessKey", ParameterValue: $awssecret},
+              {ParameterKey: "AllowedOrigins", ParameterValue: $origins},
+              {ParameterKey: "MinSize", ParameterValue: "1"},
+              {ParameterKey: "MaxSize", ParameterValue: "4"},
+              {ParameterKey: "DesiredCapacity", ParameterValue: "1"},
+              {ParameterKey: "VpcId", ParameterValue: $vpc},
+              {ParameterKey: "SubnetIds", ParameterValue: $subnets}
+            ]' > /tmp/stack-parameters.json
           
           echo "✅ Parameters prepared"
           cat /tmp/stack-parameters.json
