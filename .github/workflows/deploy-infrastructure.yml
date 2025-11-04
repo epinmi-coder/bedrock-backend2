@@ -207,6 +207,17 @@ jobs:
 
           echo "   CloudFormation command: ${CF_COMMAND}"
 
+          # Convert ALLOWED_ORIGINS to JSON format if needed
+          ALLOWED_ORIGINS='${{ secrets.ALLOWED_ORIGINS }}'
+          
+          # If it's a Python list format, convert to JSON array
+          if [[ "$ALLOWED_ORIGINS" == "["* ]]; then
+            # Replace single quotes with double quotes for valid JSON
+            ALLOWED_ORIGINS=$(echo "$ALLOWED_ORIGINS" | sed "s/'/\"/g")
+          fi
+          
+          echo "Allowed Origins (JSON format): $ALLOWED_ORIGINS"
+
           # Deploy the stack
           set +e  # Don't exit on error
           aws cloudformation ${CF_COMMAND} \
@@ -219,7 +230,7 @@ jobs:
               ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
               ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
               ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-              ParameterKey=AllowedOrigins,ParameterValue="${{ secrets.ALLOWED_ORIGINS }}" \
+              ParameterKey=AllowedOrigins,ParameterValue="$ALLOWED_ORIGINS" \
             --capabilities CAPABILITY_NAMED_IAM \
             --region ${{ env.AWS_REGION }} \
             --tags \
