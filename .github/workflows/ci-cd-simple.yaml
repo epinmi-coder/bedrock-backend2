@@ -132,6 +132,17 @@ jobs:
             --template-body file://cloudformation/infrastructure-default-vpc.yaml
           echo "✅ Template validation successful"
 
+      - name: Prepare parameters
+        id: prepare-params
+        run: |
+          # Handle AllowedOrigins - ensure it's a string
+          ALLOWED_ORIGINS='${{ secrets.ALLOWED_ORIGINS }}'
+          if [ -z "$ALLOWED_ORIGINS" ]; then
+            ALLOWED_ORIGINS='["*"]'
+          fi
+          echo "allowed_origins=$ALLOWED_ORIGINS" >> $GITHUB_OUTPUT
+          echo "✅ Allowed Origins: $ALLOWED_ORIGINS"
+
       - name: Create CloudFormation Stack
         run: |
           echo "🚀 Creating CloudFormation stack: ${{ env.STACK_NAME }}"
@@ -146,7 +157,7 @@ jobs:
               ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
               ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
               ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-              ParameterKey=AllowedOrigins,ParameterValue="${{ secrets.ALLOWED_ORIGINS || '[\"*\"]' }}" \
+              ParameterKey=AllowedOrigins,ParameterValue="${{ steps.prepare-params.outputs.allowed_origins }}" \
               ParameterKey=MinSize,ParameterValue=1 \
               ParameterKey=MaxSize,ParameterValue=4 \
               ParameterKey=DesiredCapacity,ParameterValue=1 \
