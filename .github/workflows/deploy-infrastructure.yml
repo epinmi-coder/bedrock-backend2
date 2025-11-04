@@ -207,23 +207,10 @@ jobs:
 
           echo "   CloudFormation command: ${CF_COMMAND}"
 
-          # Convert comma-separated ALLOWED_ORIGINS to JSON array format
-          # Expected input format: http://localhost:5173,https://da57vzl0vgd9l.cloudfront.net,http://localhost:5174
-          # Output format: ["http://localhost:5173","https://da57vzl0vgd9l.cloudfront.net","http://localhost:5174"]
+          # Hardcoded ALLOWED_ORIGINS in JSON format
+          ALLOWED_ORIGINS_JSON='["http://localhost:5173","https://da57vzl0vgd9l.cloudfront.net","http://localhost:5174"]'
 
-          ORIGINS_CSV='${{ secrets.ALLOWED_ORIGINS }}'
-
-          # Check if it's already in JSON format (starts with [)
-          if [[ "$ORIGINS_CSV" == "["* ]]; then
-            # Already in JSON format, just ensure double quotes
-            ALLOWED_ORIGINS_JSON=$(echo "$ORIGINS_CSV" | sed "s/'/\"/g")
-          else
-            # Convert comma-separated to JSON array
-            ALLOWED_ORIGINS_JSON=$(echo "$ORIGINS_CSV" | awk 'BEGIN{FS=","; printf "["} {for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$/, "", $i); printf "\"%s\"", $i; if(i<NF) printf ","}} END{printf "]"}')
-          fi
-
-          echo "Original ALLOWED_ORIGINS: $ORIGINS_CSV"
-          echo "Converted to JSON: $ALLOWED_ORIGINS_JSON"
+          echo "ALLOWED_ORIGINS (JSON): $ALLOWED_ORIGINS_JSON"
 
           # Deploy the stack
           set +e  # Don't exit on error
