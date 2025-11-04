@@ -56,7 +56,7 @@ jobs:
             COMMAND="create-stack"
           fi
 
-          # Deploy with inline parameters (no variables that could be interpreted)
+          # Deploy - Using only CloudFront URL for testing
           aws cloudformation $COMMAND \
             --stack-name ${{ env.STACK_NAME }} \
             --template-body file://cloudformation/backend-infrastructure.yaml \
@@ -67,7 +67,7 @@ jobs:
               ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
               ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
               ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-              'ParameterKey=AllowedOrigins,ParameterValue=["http://localhost:5173","https://da57vzl0vgd9l.cloudfront.net","http://localhost:5174"]' \
+              ParameterKey=AllowedOrigins,ParameterValue='["https://da57vzl0vgd9l.cloudfront.net"]' \
             --capabilities CAPABILITY_NAMED_IAM \
             --region ${{ env.AWS_REGION }} \
             --tags Key=Environment,Value=production Key=Project,Value=bedrock-backend || echo "No updates needed"
