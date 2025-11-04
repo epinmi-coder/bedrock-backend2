@@ -1,0 +1,14 @@
+# Ignore parameters file with actual values
+parameters.json
+
+# Ignore private keys
+*.pem
+*.ppk
+
+# Ignore deployment logs
+*.log
+
+# Ignore temporary files
+*.tmp
+*.bak
+*.swp
