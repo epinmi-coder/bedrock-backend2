@@ -14,7 +14,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  STACK_NAME: bedrock-backend-production
+  STACK_NAME: bedrock-backend
   INSTANCE_TYPE: t2.micro
 
 jobs:
