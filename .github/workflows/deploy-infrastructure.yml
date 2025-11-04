@@ -1,97 +1,400 @@
-name: 🚀 Deploy to AWS Production
+name: Deploy Backend Infrastructure to AWS
 
 on:
   push:
     branches:
       - main
+      - production
+    paths:
+      - "cloudformation/**"
+      - ".github/workflows/deploy-infrastructure.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to deploy"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+          - development
+      instance_type:
+        description: "EC2 instance type"
+        required: false
+        default: "t3.small"
+        type: choice
+        options:
+          - t3.micro
+          - t3.small
+          - t3.medium
+      stack_action:
+        description: "Stack action"
+        required: false
+        default: "create-or-update"
+        type: choice
+        options:
+          - create-or-update
+          - delete
+          - recreate
+      skip_deployment:
+        description: "Skip deployment (dry run)"
+        required: false
+        type: boolean
+        default: false
 
 env:
-  ENVIRONMENT: production
-  STACK_NAME: bedrock-backend-production
-  INSTANCE_TYPE: t2.micro
-  REGION: us-east-1
+  AWS_REGION: us-east-1
+  STACK_NAME: bedrock-backend-${{ github.event.inputs.environment || 'production' }}
 
 jobs:
-  deploy:
-    name: Deploy CloudFormation Stack
+  validate:
+    name: Validate CloudFormation Template
     runs-on: ubuntu-latest
-
     steps:
-      # 1️⃣ Checkout the repository
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2️⃣ Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
-      # 3️⃣ Install AWS CLI (in case runner doesn’t have it)
-      - name: Install AWS CLI
+      - name: Validate CloudFormation template
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y awscli jq
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/backend-infrastructure.yaml \
+            --region ${{ env.AWS_REGION }}
 
-      # 4️⃣ Set and check deployment environment variables
-      - name: Prepare deployment variables
+      - name: Check template syntax
         run: |
-          echo "ENVIRONMENT=${{ env.ENVIRONMENT }}" >> $GITHUB_ENV
-          echo "STACK_NAME=${{ env.STACK_NAME }}" >> $GITHUB_ENV
-          echo "INSTANCE_TYPE=${{ env.INSTANCE_TYPE }}" >> $GITHUB_ENV
+          echo "✅ CloudFormation template validation successful"
 
-          # Convert comma-separated origins to JSON array format
-          # Input: http://localhost:5173,https://da57vzl0vgd9l.cloudfront.net,http://localhost:5174
-          # Output: ["http://localhost:5173","https://da57vzl0vgd9l.cloudfront.net","http://localhost:5174"]
-          ORIGINS_CSV="${{ secrets.ALLOWED_ORIGINS }}"
-          ORIGINS_JSON=$(echo "$ORIGINS_CSV" | awk -F',' '{printf "["; for(i=1;i<=NF;i++){printf "\"%s\"", $i; if(i<NF) printf ","}; printf "]"}')
-          echo "ALLOWED_ORIGINS_JSON=$ORIGINS_JSON" >> $GITHUB_ENV
+  deploy-infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: validate
+    if: ${{ !github.event.inputs.skip_deployment }}
+    environment:
+      name: ${{ github.event.inputs.environment || 'production' }}
+      url: ${{ steps.get-url.outputs.alb_url }}
+    outputs:
+      alb_dns: ${{ steps.get-outputs.outputs.alb_dns }}
+      alb_url: ${{ steps.get-outputs.outputs.alb_url }}
+      asg_name: ${{ steps.get-outputs.outputs.asg_name }}
 
-          echo "Original origins: $ORIGINS_CSV"
-          echo "Converted to JSON: $ORIGINS_JSON"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      # 5️⃣ Deploy the CloudFormation stack
-      - name: Deploy stack to AWS
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check stack status
+        id: check-stack
         run: |
-          echo "🚀 Deploying stack: $STACK_NAME"
+          echo "🔍 Checking stack status..."
+
+          STACK_ACTION="${{ github.event.inputs.stack_action || 'create-or-update' }}"
+
+          if aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            
+            STACK_STATUS=$(aws cloudformation describe-stacks \
+              --stack-name ${{ env.STACK_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Stacks[0].StackStatus' \
+              --output text)
+            
+            echo "Stack exists with status: $STACK_STATUS"
+            echo "stack_exists=true" >> $GITHUB_OUTPUT
+            echo "stack_status=$STACK_STATUS" >> $GITHUB_OUTPUT
+            
+            # Check if stack is in a failed state
+            if [[ "$STACK_STATUS" == *"FAILED"* ]] || [[ "$STACK_STATUS" == *"ROLLBACK"* ]]; then
+              echo "stack_in_failed_state=true" >> $GITHUB_OUTPUT
+              echo "⚠️  Stack is in failed state: $STACK_STATUS"
+            else
+              echo "stack_in_failed_state=false" >> $GITHUB_OUTPUT
+            fi
+            
+            # Determine action based on input
+            if [ "$STACK_ACTION" = "recreate" ]; then
+              echo "action=recreate" >> $GITHUB_OUTPUT
+              echo "needs_deletion=true" >> $GITHUB_OUTPUT
+            elif [ "$STACK_ACTION" = "delete" ]; then
+              echo "action=delete" >> $GITHUB_OUTPUT
+              echo "needs_deletion=true" >> $GITHUB_OUTPUT
+            else
+              echo "action=update" >> $GITHUB_OUTPUT
+              echo "needs_deletion=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "Stack does not exist"
+            echo "stack_exists=false" >> $GITHUB_OUTPUT
+            echo "stack_status=NOT_EXISTS" >> $GITHUB_OUTPUT
+            echo "stack_in_failed_state=false" >> $GITHUB_OUTPUT
+            echo "needs_deletion=false" >> $GITHUB_OUTPUT
+            
+            if [ "$STACK_ACTION" = "delete" ]; then
+              echo "action=skip" >> $GITHUB_OUTPUT
+              echo "⚠️  Cannot delete - stack does not exist"
+            else
+              echo "action=create" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Delete existing stack
+        if: steps.check-stack.outputs.needs_deletion == 'true'
+        run: |
+          echo "🗑️  Deleting stack: ${{ env.STACK_NAME }}"
+          echo "⚠️  This will destroy all resources in the stack!"
+
+          aws cloudformation delete-stack \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+          echo "⏳ Waiting for stack deletion to complete..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} || {
+              echo "❌ Stack deletion failed or timed out"
+              
+              # Check if stack still exists and is in DELETE_FAILED state
+              STACK_STATUS=$(aws cloudformation describe-stacks \
+                --stack-name ${{ env.STACK_NAME }} \
+                --region ${{ env.AWS_REGION }} \
+                --query 'Stacks[0].StackStatus' \
+                --output text 2>/dev/null || echo "DELETED")
+              
+              if [ "$STACK_STATUS" = "DELETE_FAILED" ]; then
+                echo "⚠️  Stack is in DELETE_FAILED state. Manual intervention may be required."
+                echo "   Check AWS Console for resources that failed to delete."
+                exit 1
+              fi
+            }
+
+          echo "✅ Stack deleted successfully"
+
+      - name: Deploy CloudFormation stack
+        id: deploy-stack
+        if: steps.check-stack.outputs.action != 'delete' && steps.check-stack.outputs.action != 'skip'
+        run: |
+          ENVIRONMENT="${{ github.event.inputs.environment || 'production' }}"
+          INSTANCE_TYPE="${{ github.event.inputs.instance_type || 't2.micro' }}"
+          ACTION="${{ steps.check-stack.outputs.action }}"
+
+          echo "🚀 Deploying stack: ${{ env.STACK_NAME }}"
           echo "   Environment: $ENVIRONMENT"
           echo "   Instance Type: $INSTANCE_TYPE"
-          echo "   Allowed Origins: $ALLOWED_ORIGINS_JSON"
+          echo "   Action: ${ACTION}"
 
-          aws cloudformation create-stack \
-            --stack-name "$STACK_NAME" \
+          # Determine CloudFormation command (create or update)
+          if [ "$ACTION" = "create" ] || [ "$ACTION" = "recreate" ]; then
+            CF_COMMAND="create-stack"
+            WAIT_COMMAND="stack-create-complete"
+          else
+            CF_COMMAND="update-stack"
+            WAIT_COMMAND="stack-update-complete"
+          fi
+
+          echo "   CloudFormation command: ${CF_COMMAND}"
+
+          # Convert comma-separated ALLOWED_ORIGINS to JSON array format
+          # Expected input format: http://localhost:5173,https://da57vzl0vgd9l.cloudfront.net,http://localhost:5174
+          # Output format: ["http://localhost:5173","https://da57vzl0vgd9l.cloudfront.net","http://localhost:5174"]
+
+          ORIGINS_CSV='${{ secrets.ALLOWED_ORIGINS }}'
+
+          # Check if it's already in JSON format (starts with [)
+          if [[ "$ORIGINS_CSV" == "["* ]]; then
+            # Already in JSON format, just ensure double quotes
+            ALLOWED_ORIGINS_JSON=$(echo "$ORIGINS_CSV" | sed "s/'/\"/g")
+          else
+            # Convert comma-separated to JSON array
+            ALLOWED_ORIGINS_JSON=$(echo "$ORIGINS_CSV" | awk 'BEGIN{FS=","; printf "["} {for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$/, "", $i); printf "\"%s\"", $i; if(i<NF) printf ","}} END{printf "]"}')
+          fi
+
+          echo "Original ALLOWED_ORIGINS: $ORIGINS_CSV"
+          echo "Converted to JSON: $ALLOWED_ORIGINS_JSON"
+
+          # Deploy the stack
+          set +e  # Don't exit on error
+          aws cloudformation ${CF_COMMAND} \
+            --stack-name ${{ env.STACK_NAME }} \
             --template-body file://cloudformation/backend-infrastructure.yaml \
-            --capabilities CAPABILITY_NAMED_IAM \
             --parameters \
-              ParameterKey=Environment,ParameterValue="$ENVIRONMENT" \
-              ParameterKey=InstanceType,ParameterValue="$INSTANCE_TYPE" \
-              ParameterKey=KeyPairName,ParameterValue="${{ secrets.EC2_KEY_PAIR_NAME }}" \
+              ParameterKey=Environment,ParameterValue=$ENVIRONMENT \
+              ParameterKey=InstanceType,ParameterValue=$INSTANCE_TYPE \
+              ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
               ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
               ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
               ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
               ParameterKey=AllowedOrigins,ParameterValue="$ALLOWED_ORIGINS_JSON" \
-            || echo "Stack may already exist, attempting update..."
-
-          # If stack exists, update instead
-          aws cloudformation update-stack \
-            --stack-name "$STACK_NAME" \
-            --template-body file://cloudformation/backend-infrastructure.yaml \
             --capabilities CAPABILITY_NAMED_IAM \
-            --parameters \
-              ParameterKey=Environment,ParameterValue="$ENVIRONMENT" \
-              ParameterKey=InstanceType,ParameterValue="$INSTANCE_TYPE" \
-              ParameterKey=KeyPairName,ParameterValue="${{ secrets.EC2_KEY_PAIR_NAME }}" \
-              ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
-              ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-              ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-              ParameterKey=AllowedOrigins,ParameterValue="$ALLOWED_ORIGINS_JSON" \
-            || echo "✅ No updates to perform"
+            --region ${{ env.AWS_REGION }} \
+            --tags \
+              Key=Environment,Value=$ENVIRONMENT \
+              Key=Project,Value=bedrock-backend \
+              Key=ManagedBy,Value=GitHub-Actions \
+              Key=Repository,Value=${{ github.repository }} \
+              Key=CommitSHA,Value=${{ github.sha }}
 
-      # 6️⃣ Confirm successful deployment
-      - name: Verify stack status
+          CF_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
+
+          # Check if update failed because no changes were detected
+          if [ $CF_EXIT_CODE -ne 0 ] && [ "$CF_COMMAND" = "update-stack" ]; then
+            ERROR_MESSAGE=$(aws cloudformation describe-stacks \
+              --stack-name ${{ env.STACK_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>&1 || echo "")
+            
+            if echo "$ERROR_MESSAGE" | grep -q "No updates are to be performed"; then
+              echo "ℹ️  No changes detected - stack is already up to date"
+              echo "deployment_status=no-changes" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              echo "❌ Stack deployment failed"
+              exit $CF_EXIT_CODE
+            fi
+          elif [ $CF_EXIT_CODE -ne 0 ]; then
+            echo "❌ Stack creation failed"
+            exit $CF_EXIT_CODE
+          fi
+
+          echo "deployment_status=in-progress" >> $GITHUB_OUTPUT
+
+      - name: Wait for stack completion
+        if: steps.deploy-stack.outputs.deployment_status == 'in-progress'
         run: |
-          echo "⏳ Checking stack status..."
-          aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
-            --query "Stacks[0].StackStatus"
+          echo "⏳ Waiting for stack to complete..."
+
+          ACTION="${{ steps.check-stack.outputs.action }}"
+
+          if [ "$ACTION" = "create" ] || [ "$ACTION" = "recreate" ]; then
+            WAIT_COMMAND="stack-create-complete"
+          else
+            WAIT_COMMAND="stack-update-complete"
+          fi
+
+          echo "   Wait command: ${WAIT_COMMAND}"
+
+          set +e  # Don't exit on error
+          aws cloudformation wait ${WAIT_COMMAND} \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+          WAIT_EXIT_CODE=$?
+          set -e
+
+          if [ $WAIT_EXIT_CODE -ne 0 ]; then
+            echo "❌ Stack operation did not complete successfully"
+            
+            # Get stack status and events for troubleshooting
+            STACK_STATUS=$(aws cloudformation describe-stacks \
+              --stack-name ${{ env.STACK_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Stacks[0].StackStatus' \
+              --output text 2>/dev/null || echo "UNKNOWN")
+            
+            echo "   Current stack status: $STACK_STATUS"
+            echo ""
+            echo "📋 Recent stack events (last 10):"
+            aws cloudformation describe-stack-events \
+              --stack-name ${{ env.STACK_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --max-items 10 \
+              --query 'StackEvents[*].[Timestamp,ResourceStatus,ResourceType,LogicalResourceId,ResourceStatusReason]' \
+              --output table || true
+            
+            exit $WAIT_EXIT_CODE
+          fi
+
+          echo "✅ Stack operation completed successfully"
+
+      - name: Get stack outputs
+        id: get-outputs
+        if: steps.check-stack.outputs.action != 'delete' && steps.check-stack.outputs.action != 'skip'
+        run: |
+          echo "📊 Retrieving stack outputs..."
+
+          # Check if stack exists first
+          if ! aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "⚠️  Stack not found - skipping output retrieval"
+            echo "alb_dns=" >> $GITHUB_OUTPUT
+            echo "alb_url=" >> $GITHUB_OUTPUT
+            echo "asg_name=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerDNS`].OutputValue' \
+            --output text 2>/dev/null || echo "")
+
+          ALB_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerURL`].OutputValue' \
+            --output text 2>/dev/null || echo "")
+
+          ASG_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroupName`].OutputValue' \
+            --output text 2>/dev/null || echo "")
+
+          echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
+          echo "alb_url=$ALB_URL" >> $GITHUB_OUTPUT
+          echo "asg_name=$ASG_NAME" >> $GITHUB_OUTPUT
+
+          if [ -n "$ALB_URL" ]; then
+            echo "🌐 Load Balancer URL: $ALB_URL"
+          fi
+          if [ -n "$ASG_NAME" ]; then
+            echo "📦 Auto Scaling Group: $ASG_NAME"
+          fi
+
+      - name: Create deployment summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🚀 Infrastructure Deployment Complete
+
+          ## Stack Information
+          - **Stack Name**: \`${{ env.STACK_NAME }}\`
+          - **Region**: \`${{ env.AWS_REGION }}\`
+          - **Environment**: \`${{ github.event.inputs.environment || 'production' }}\`
+          - **Action**: \`${{ steps.check-stack.outputs.action }}\`
+
+          ## Outputs
+          - **Load Balancer URL**: [${{ steps.get-outputs.outputs.alb_url }}](${{ steps.get-outputs.outputs.alb_url }})
+          - **ALB DNS**: \`${{ steps.get-outputs.outputs.alb_dns }}\`
+          - **Auto Scaling Group**: \`${{ steps.get-outputs.outputs.asg_name }}\`
+
+          ## Next Steps
+          1. Wait for application deployment workflow to complete
+          2. Test health endpoint: ${{ steps.get-outputs.outputs.alb_url }}/health
+          3. Update frontend \`VITE_API_ENDPOINT\` to: \`${{ steps.get-outputs.outputs.alb_url }}\`
+
+          ## Resources Created
+          - VPC with 2 public subnets
+          - Application Load Balancer
+          - Auto Scaling Group (1-3 instances)
+          - Security Groups
+          - CloudWatch Alarms
+
+          ---
+          *Deployed by GitHub Actions - Commit: ${{ github.sha }}*
+          EOF
