@@ -13,12 +13,10 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: t3.small
+    Default: t2.micro
     AllowedValues:
-      - t3.micro
-      - t3.small
-      - t3.medium
-      - t3.large
+      - t2.micro
+      - t2.small
     Description: EC2 instance type
 
   KeyPairName:
@@ -53,22 +51,8 @@ Parameters:
 Mappings:
   RegionMap:
     us-east-1:
-      AMI: ami-0e001c9271cf7f3b9 # Ubuntu 22.04 LTS
-    us-east-2:
-      AMI: ami-0900fe555666598a2
-    us-west-1:
-      AMI: ami-0cbd0a3af75c2d849
-    us-west-2:
-      AMI: ami-0efcece6bed30fd98
-    eu-west-1:
-      AMI: ami-0905a3c97561e0b69
-    eu-central-1:
-      AMI: ami-0faab6bdbac9486fb
-    ap-southeast-1:
-      AMI: ami-0497a974f8d5dcef8
-    ap-northeast-1:
-      AMI: ami-09a81b370b76de6a2
-
+      AMI: ami-0ecb62995f68bb549
+    
 Conditions:
   UseCustomAmi: !Not [!Equals [!Ref AmiId, ""]]
 
