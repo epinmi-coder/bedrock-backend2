@@ -1,0 +1,104 @@
+name: Deploy Application
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: bedrock-backend-production
+
+jobs:
+  deploy-app:
+    name: Deploy Application to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get EC2 instances
+        id: get-instances
+        run: |
+          echo "🔍 Finding EC2 instances..."
+
+          ASG_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`AutoScalingGroupName`].OutputValue' \
+            --output text)
+
+          INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names $ASG_NAME \
+            --region ${{ env.AWS_REGION }} \
+            --query 'AutoScalingGroups[0].Instances[?HealthStatus==`Healthy`].InstanceId' \
+            --output text)
+
+          echo "instances=$INSTANCE_IDS" >> $GITHUB_OUTPUT
+          echo "Found instances: $INSTANCE_IDS"
+
+      - name: Deploy to EC2 instances
+        run: |
+          echo "🚀 Deploying application..."
+
+          for INSTANCE_ID in ${{ steps.get-instances.outputs.instances }}; do
+            echo "📦 Deploying to instance: $INSTANCE_ID"
+            
+            # Get instance IP
+            INSTANCE_IP=$(aws ec2 describe-instances \
+              --instance-ids $INSTANCE_ID \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
+            
+            echo "IP: $INSTANCE_IP"
+            
+            # SSH and deploy (you'll need to set up SSH key in secrets)
+            # For now, just use SSM to run commands
+            aws ssm send-command \
+              --instance-ids $INSTANCE_ID \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=[
+                "cd /opt/bedrock-backend",
+                "git pull origin main",
+                "source venv/bin/activate",
+                "pip install -r requirements.txt",
+                "supervisorctl restart bedrock-backend"
+              ]' \
+              --region ${{ env.AWS_REGION }} \
+              --output text
+            
+            echo "✅ Deployed to $INSTANCE_ID"
+          done
+
+          echo "🎉 All instances updated!"
+
+      - name: Health check
+        run: |
+          echo "🏥 Running health checks..."
+
+          ALB_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerURL`].OutputValue' \
+            --output text)
+
+          echo "Checking: $ALB_URL/health"
+
+          for i in {1..10}; do
+            if curl -f "$ALB_URL/health"; then
+              echo "✅ Health check passed!"
+              exit 0
+            fi
+            echo "⏳ Waiting... ($i/10)"
+            sleep 10
+          done
+
+          echo "❌ Health check failed"
+          exit 1
