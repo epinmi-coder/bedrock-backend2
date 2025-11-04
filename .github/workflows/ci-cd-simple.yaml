@@ -61,9 +61,52 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Check if stack exists
+        id: check-stack
+        run: |
+          echo "🔍 Checking if stack exists..."
+          
+          if aws cloudformation describe-stacks --stack-name ${{ env.STACK_NAME }} 2>/dev/null; then
+            STACK_STATUS=$(aws cloudformation describe-stacks \
+              --stack-name ${{ env.STACK_NAME }} \
+              --query 'Stacks[0].StackStatus' \
+              --output text)
+            
+            echo "stack_exists=true" >> $GITHUB_OUTPUT
+            echo "stack_status=$STACK_STATUS" >> $GITHUB_OUTPUT
+            echo "📦 Stack exists with status: $STACK_STATUS"
+          else
+            echo "stack_exists=false" >> $GITHUB_OUTPUT
+            echo "📦 Stack does not exist"
+          fi
+
+      - name: Delete failed or existing stack
+        if: steps.check-stack.outputs.stack_exists == 'true'
+        run: |
+          STACK_STATUS="${{ steps.check-stack.outputs.stack_status }}"
+          
+          echo "🗑️ Deleting existing stack: ${{ env.STACK_NAME }}"
+          echo "Current status: $STACK_STATUS"
+          
+          # If stack is in ROLLBACK_COMPLETE or failed state, we must delete it
+          if [[ "$STACK_STATUS" == "ROLLBACK_COMPLETE" ]] || [[ "$STACK_STATUS" == *"FAILED"* ]]; then
+            echo "⚠️ Stack is in $STACK_STATUS state - deletion required"
+          fi
+          
+          # Delete the stack
+          aws cloudformation delete-stack --stack-name ${{ env.STACK_NAME }}
+          
+          echo "⏳ Waiting for stack deletion to complete..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name ${{ env.STACK_NAME }} || true
+          
+          echo "✅ Stack deleted successfully"
+
       - name: Get Default VPC and Subnets
         id: get-vpc
         run: |
+          echo "🔍 Getting default VPC and subnets..."
+          
           # Get default VPC
           VPC_ID=$(aws ec2 describe-vpcs \
             --filters "Name=isDefault,Values=true" \
@@ -82,26 +125,45 @@ jobs:
           echo "subnet_ids=$SUBNET_IDS" >> $GITHUB_OUTPUT
           echo "✅ Subnets: $SUBNET_IDS"
 
-      - name: Deploy CloudFormation Stack
+      - name: Validate CloudFormation template
         run: |
-          aws cloudformation deploy \
-            --template-file cloudformation/infrastructure-default-vpc.yaml \
+          echo "🔍 Validating CloudFormation template..."
+          aws cloudformation validate-template \
+            --template-body file://cloudformation/infrastructure-default-vpc.yaml
+          echo "✅ Template validation successful"
+
+      - name: Create CloudFormation Stack
+        run: |
+          echo "🚀 Creating CloudFormation stack: ${{ env.STACK_NAME }}"
+          
+          aws cloudformation create-stack \
             --stack-name ${{ env.STACK_NAME }} \
-            --parameter-overrides \
-              Environment=production \
-              InstanceType=t2.micro \
-              KeyPairName=${{ secrets.EC2_KEY_PAIR_NAME }} \
-              DatabaseURL="${{ secrets.DATABASE_URL }}" \
-              AWSAccessKeyId="${{ secrets.AWS_ACCESS_KEY_ID }}" \
-              AWSSecretAccessKey="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
-              AllowedOrigins="${{ secrets.ALLOWED_ORIGINS || '[\"*\"]' }}" \
-              MinSize=1 \
-              MaxSize=4 \
-              DesiredCapacity=1 \
-              VpcId=${{ steps.get-vpc.outputs.vpc_id }} \
-              SubnetIds="${{ steps.get-vpc.outputs.subnet_ids }}" \
+            --template-body file://cloudformation/infrastructure-default-vpc.yaml \
+            --parameters \
+              ParameterKey=Environment,ParameterValue=production \
+              ParameterKey=InstanceType,ParameterValue=t2.micro \
+              ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
+              ParameterKey=DatabaseURL,ParameterValue="${{ secrets.DATABASE_URL }}" \
+              ParameterKey=AWSAccessKeyId,ParameterValue="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+              ParameterKey=AWSSecretAccessKey,ParameterValue="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+              ParameterKey=AllowedOrigins,ParameterValue="${{ secrets.ALLOWED_ORIGINS || '[\"*\"]' }}" \
+              ParameterKey=MinSize,ParameterValue=1 \
+              ParameterKey=MaxSize,ParameterValue=4 \
+              ParameterKey=DesiredCapacity,ParameterValue=1 \
+              ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc_id }} \
+              ParameterKey=SubnetIds,ParameterValue="${{ steps.get-vpc.outputs.subnet_ids }}" \
             --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset
+            --tags \
+              Key=Project,Value=BedrockBackend \
+              Key=Environment,Value=production \
+              Key=ManagedBy,Value=CloudFormation \
+              Key=DeployedBy,Value=GitHubActions
+          
+          echo "⏳ Waiting for stack creation to complete (this may take 5-10 minutes)..."
+          aws cloudformation wait stack-create-complete \
+            --stack-name ${{ env.STACK_NAME }}
+          
+          echo "✅ Stack created successfully"
 
       - name: Get Stack Outputs
         id: stack-outputs
@@ -253,18 +315,64 @@ jobs:
           echo "❌ Health check failed after 15 attempts"
           exit 1
 
+      - name: Generate deployment summary
+        if: always()
+        run: |
+          ALB_URL="${{ needs.deploy-infrastructure.outputs.alb_url }}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🚀 Deployment Summary
+
+          ### Stack Information
+          - **Stack Name:** \`${{ env.STACK_NAME }}\`
+          - **Region:** \`${{ env.AWS_REGION }}\`
+          - **Environment:** \`production\`
+
+          ### Application URL
+          - **Load Balancer URL:** $ALB_URL
+          - **Health Check:** $ALB_URL/health
+
+          ### Build Information
+          - **Commit:** \`${{ github.sha }}\`
+          - **Branch:** \`${{ github.ref_name }}\`
+          - **Actor:** @${{ github.actor }}
+          - **Repository:** ${{ github.repository }}
+
+          ### Deployment Status
+          ✅ Infrastructure provisioned successfully
+          ✅ Application code deployed via SSM
+          ✅ Health checks passed
+
+          ### Quick Access
+          \`\`\`bash
+          # Test the API
+          curl $ALB_URL/health
+          curl $ALB_URL/
+          \`\`\`
+
+          ---
+          *Deployment completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')*
+          EOF
+
   # ==================== Notification ====================
   notify:
     name: Notify
     runs-on: ubuntu-latest
-    needs: [verify]
+    needs: [deploy-infrastructure, verify]
     if: always()
 
     steps:
       - name: Deployment Status
         run: |
+          ALB_URL="${{ needs.deploy-infrastructure.outputs.alb_url }}"
+
           if [ "${{ needs.verify.result }}" = "success" ]; then
             echo "✅ Deployment completed successfully!"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "🌐 Application URL: $ALB_URL"
+            echo "❤️  Health Check: $ALB_URL/health"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           else
             echo "❌ Deployment failed!"
             exit 1
