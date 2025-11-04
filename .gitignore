@@ -33,7 +33,7 @@ venv.bak/
 .env.local
 .env.*.local
 
-# IDEs
+# IDEs and Editors
 .vscode/
 .idea/
 *.swp
@@ -58,13 +58,20 @@ htmlcov/
 .tox/
 
 # Alembic
-# Keep alembic/ but ignore compiled Python files
-# (already covered by __pycache__/)
+# Keep alembic/ but ignore compiled Python files (already covered by __pycache__/)
 
 # AWS
 .aws/
 
-# Temporary files
+# Cache and Temporary Files
+.cache/
 *.tmp
 *.temp
-.cache/
+*.bak
+
+# Deployment and Config
+parameters.json
+
+# Private Keys
+*.pem
+*.ppk
