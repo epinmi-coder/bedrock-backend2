@@ -169,7 +169,8 @@ jobs:
           echo "Instance type: t2.micro (Free tier eligible)"
 
           # Build a parameters JSON file to avoid CLI parsing/quoting issues
-          cat > /tmp/cf-params.json <<'CFPARAMS'
+          # Note: heredoc without quotes allows GitHub Actions variable substitution
+          cat > /tmp/cf-params.json <<CFPARAMS
 [
   {"ParameterKey":"Environment","ParameterValue":"production"},
   {"ParameterKey":"InstanceType","ParameterValue":"t2.micro"},
