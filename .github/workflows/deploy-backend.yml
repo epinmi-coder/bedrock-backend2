@@ -168,33 +168,52 @@ jobs:
           echo "Using default VPC and subnets in us-east-2"
           echo "Instance type: t2.micro (Free tier eligible)"
 
-          # Build a parameters JSON file to avoid CLI parsing/quoting issues
-          # Note: heredoc without quotes allows GitHub Actions variable substitution
-          cat > /tmp/cf-params.json <<CFPARAMS
-[
-  {"ParameterKey":"Environment","ParameterValue":"production"},
-  {"ParameterKey":"InstanceType","ParameterValue":"t2.micro"},
-  {"ParameterKey":"KeyPairName","ParameterValue":"${{ secrets.EC2_KEY_PAIR_NAME }}"},
-  {"ParameterKey":"DockerImage","ParameterValue":"${{ needs.build-and-push.outputs.image-uri }}"},
-  {"ParameterKey":"DatabaseURL","ParameterValue":"${{ secrets.DATABASE_URL }}"},
-  {"ParameterKey":"AWSAccessKeyId","ParameterValue":"${{ secrets.AWS_ACCESS_KEY_ID }}"},
-  {"ParameterKey":"AWSSecretAccessKey","ParameterValue":"${{ secrets.AWS_SECRET_ACCESS_KEY }}"},
-  {"ParameterKey":"JWTSecret","ParameterValue":"${{ secrets.JWT_SECRET }}"},
-  {"ParameterKey":"FrontendDomain","ParameterValue":"localhost:5173"},
-  {"ParameterKey":"MailServer","ParameterValue":"${{ secrets.MAIL_SERVER }}"},
-  {"ParameterKey":"MailPort","ParameterValue":"${{ secrets.MAIL_PORT }}"},
-  {"ParameterKey":"MailUsername","ParameterValue":"${{ secrets.MAIL_USERNAME }}"},
-  {"ParameterKey":"MailPassword","ParameterValue":"${{ secrets.MAIL_PASSWORD }}"},
-  {"ParameterKey":"MailFrom","ParameterValue":"${{ secrets.MAIL_FROM }}"},
-  {"ParameterKey":"MailFromName","ParameterValue":"Security Platform"},
-  {"ParameterKey":"Domain","ParameterValue":"TBD"},
-  {"ParameterKey":"VpcId","ParameterValue":"${{ steps.get-vpc.outputs.vpc-id }}"},
-  {"ParameterKey":"SubnetIds","ParameterValue":"${{ steps.get-vpc.outputs.subnet-ids }}"},
-  {"ParameterKey":"MinSize","ParameterValue":"1"},
-  {"ParameterKey":"MaxSize","ParameterValue":"3"},
-  {"ParameterKey":"DesiredCapacity","ParameterValue":"1"}
-]
-CFPARAMS
+          # Build parameters JSON with proper escaping using jq
+          jq -n \
+            --arg env "production" \
+            --arg instanceType "t2.micro" \
+            --arg keyPair "${{ secrets.EC2_KEY_PAIR_NAME }}" \
+            --arg dockerImage "${{ needs.build-and-push.outputs.image-uri }}" \
+            --arg dbUrl "${{ secrets.DATABASE_URL }}" \
+            --arg awsKeyId "${{ secrets.AWS_ACCESS_KEY_ID }}" \
+            --arg awsSecret "${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            --arg jwtSecret "${{ secrets.JWT_SECRET }}" \
+            --arg frontendDomain "localhost:5173" \
+            --arg mailServer "${{ secrets.MAIL_SERVER }}" \
+            --arg mailPort "${{ secrets.MAIL_PORT }}" \
+            --arg mailUser "${{ secrets.MAIL_USERNAME }}" \
+            --arg mailPass "${{ secrets.MAIL_PASSWORD }}" \
+            --arg mailFrom "${{ secrets.MAIL_FROM }}" \
+            --arg mailFromName "Security Platform" \
+            --arg domain "TBD" \
+            --arg vpcId "${{ steps.get-vpc.outputs.vpc-id }}" \
+            --arg subnetIds "${{ steps.get-vpc.outputs.subnet-ids }}" \
+            --arg minSize "1" \
+            --arg maxSize "3" \
+            --arg desiredCap "1" \
+            '[
+              {ParameterKey: "Environment", ParameterValue: $env},
+              {ParameterKey: "InstanceType", ParameterValue: $instanceType},
+              {ParameterKey: "KeyPairName", ParameterValue: $keyPair},
+              {ParameterKey: "DockerImage", ParameterValue: $dockerImage},
+              {ParameterKey: "DatabaseURL", ParameterValue: $dbUrl},
+              {ParameterKey: "AWSAccessKeyId", ParameterValue: $awsKeyId},
+              {ParameterKey: "AWSSecretAccessKey", ParameterValue: $awsSecret},
+              {ParameterKey: "JWTSecret", ParameterValue: $jwtSecret},
+              {ParameterKey: "FrontendDomain", ParameterValue: $frontendDomain},
+              {ParameterKey: "MailServer", ParameterValue: $mailServer},
+              {ParameterKey: "MailPort", ParameterValue: $mailPort},
+              {ParameterKey: "MailUsername", ParameterValue: $mailUser},
+              {ParameterKey: "MailPassword", ParameterValue: $mailPass},
+              {ParameterKey: "MailFrom", ParameterValue: $mailFrom},
+              {ParameterKey: "MailFromName", ParameterValue: $mailFromName},
+              {ParameterKey: "Domain", ParameterValue: $domain},
+              {ParameterKey: "VpcId", ParameterValue: $vpcId},
+              {ParameterKey: "SubnetIds", ParameterValue: $subnetIds},
+              {ParameterKey: "MinSize", ParameterValue: $minSize},
+              {ParameterKey: "MaxSize", ParameterValue: $maxSize},
+              {ParameterKey: "DesiredCapacity", ParameterValue: $desiredCap}
+            ]' > /tmp/cf-params.json
 
           aws cloudformation create-stack \
             --stack-name ${{ env.STACK_NAME }} \
