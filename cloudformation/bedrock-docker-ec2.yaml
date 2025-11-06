@@ -9,11 +9,12 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: t2.micro
+    Default: t3.medium
     AllowedValues:
-      - t2.micro
-      - t2.small
-    Description: EC2 instance type (t2.small recommended for running FastAPI + Celery + Redis containers)
+      - t3.medium
+      - t3.large
+      - t2.medium
+    Description: EC2 instance type (t3.medium recommended for faster deployment and running FastAPI + Celery + Redis containers)
 
   KeyPairName:
     Type: AWS::EC2::KeyPair::KeyName
@@ -280,7 +281,7 @@ Resources:
     Properties:
       LaunchTemplateName: !Sub ${Environment}-bedrock-lt
       LaunchTemplateData:
-        ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+        ImageId: ami-0f5fcdfbd140e4ab7
         InstanceType: !Ref InstanceType
         KeyName: !Ref KeyPairName
         IamInstanceProfile:
