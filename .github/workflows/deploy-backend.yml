@@ -167,12 +167,12 @@ jobs:
         run: |
           echo "Creating CloudFormation stack for first deployment..."
           echo "Using default VPC and subnets in us-east-2"
-          echo "Instance type: t2.micro (Free tier eligible)"
+          echo "Instance type: t3.medium (Faster deployment)"
 
           # Build parameters JSON with proper escaping using jq
           jq -n \
             --arg env "production" \
-            --arg instanceType "t2.micro" \
+            --arg instanceType "t3.medium" \
             --arg keyPair "${{ secrets.EC2_KEY_PAIR_NAME }}" \
             --arg dockerImage "${{ needs.build-and-push.outputs.image-uri }}" \
             --arg dbUrl "${{ secrets.DATABASE_URL }}" \
