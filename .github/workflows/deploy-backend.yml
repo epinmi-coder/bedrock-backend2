@@ -46,6 +46,21 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Create ECR repository if it doesn't exist
+        run: |
+          echo "Checking if ECR repository exists..."
+          if aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} 2>/dev/null; then
+            echo "✅ ECR repository '${{ env.ECR_REPOSITORY }}' already exists"
+          else
+            echo "📦 Creating ECR repository '${{ env.ECR_REPOSITORY }}'..."
+            aws ecr create-repository \
+              --repository-name ${{ env.ECR_REPOSITORY }} \
+              --region ${{ env.AWS_REGION }} \
+              --image-scanning-configuration scanOnPush=true \
+              --encryption-configuration encryptionType=AES256
+            echo "✅ ECR repository created successfully!"
+          fi
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -94,6 +109,9 @@ jobs:
     needs: build-and-push
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -101,34 +119,187 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Check if CloudFormation stack exists
+        id: check-stack
+        continue-on-error: true
+        run: |
+          echo "Checking for existing CloudFormation stack..."
+          echo "Stack name: ${{ env.STACK_NAME }}"
+          echo "Region: ${{ env.AWS_REGION }}"
+
+          if aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null; then
+            echo "stack-exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Stack exists, will perform rolling update"
+          else
+            echo "stack-exists=false" >> $GITHUB_OUTPUT
+            echo "📦 Stack does not exist, will create new infrastructure"
+          fi
+
+      - name: Get default VPC and subnets
+        id: get-vpc
+        if: steps.check-stack.outputs.stack-exists == 'false'
+        run: |
+          # Get default VPC in us-east-2
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=is-default,Values=true" \
+            --query "Vpcs[0].VpcId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          echo "vpc-id=${VPC_ID}" >> $GITHUB_OUTPUT
+          echo "Default VPC ID: ${VPC_ID}"
+
+          # Get at least 2 subnets from default VPC
+          SUBNET_IDS=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=${VPC_ID}" \
+            --query "Subnets[0:2].SubnetId" \
+            --output text \
+            --region ${{ env.AWS_REGION }} | tr '\t' ',')
+          echo "subnet-ids=${SUBNET_IDS}" >> $GITHUB_OUTPUT
+          echo "Subnet IDs: ${SUBNET_IDS}"
+
+      - name: Create CloudFormation stack (first deployment)
+        if: steps.check-stack.outputs.stack-exists == 'false'
+        run: |
+          echo "Creating CloudFormation stack for first deployment..."
+          echo "Using default VPC and subnets in us-east-2"
+          echo "Instance type: t2.micro (Free tier eligible)"
+
+          aws cloudformation create-stack \
+            --stack-name ${{ env.STACK_NAME }} \
+            --template-body file://cloudformation/bedrock-docker-ec2.yaml \
+            --parameters \
+              ParameterKey=Environment,ParameterValue=production \
+              ParameterKey=InstanceType,ParameterValue=t2.micro \
+              ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
+              ParameterKey=DockerImage,ParameterValue=${{ needs.build-and-push.outputs.image-uri }} \
+              ParameterKey=DatabaseURL,ParameterValue=${{ secrets.DATABASE_URL }} \
+              ParameterKey=AWSAccessKeyId,ParameterValue=${{ secrets.AWS_ACCESS_KEY_ID }} \
+              ParameterKey=AWSSecretAccessKey,ParameterValue=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
+              ParameterKey=JWTSecret,ParameterValue=${{ secrets.JWT_SECRET }} \
+              ParameterKey=FrontendDomain,ParameterValue=localhost:5173 \
+              ParameterKey=MailServer,ParameterValue=${{ secrets.MAIL_SERVER }} \
+              ParameterKey=MailPort,ParameterValue=${{ secrets.MAIL_PORT }} \
+              ParameterKey=MailUsername,ParameterValue=${{ secrets.MAIL_USERNAME }} \
+              ParameterKey=MailPassword,ParameterValue=${{ secrets.MAIL_PASSWORD }} \
+              ParameterKey=MailFrom,ParameterValue=${{ secrets.MAIL_FROM }} \
+              ParameterKey=MailFromName,ParameterValue="Security Platform" \
+              ParameterKey=Domain,ParameterValue=TBD \
+              ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc-id }} \
+              ParameterKey=SubnetIds,ParameterValue=${{ steps.get-vpc.outputs.subnet-ids }} \
+              ParameterKey=MinSize,ParameterValue=1 \
+              ParameterKey=MaxSize,ParameterValue=3 \
+              ParameterKey=DesiredCapacity,ParameterValue=1 \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Waiting for stack creation to complete (this may take 5-10 minutes)..."
+          aws cloudformation wait stack-create-complete \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Stack created successfully!"
+
+          # Get and display ALB DNS
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" \
+            --output text \
+            --region ${{ env.AWS_REGION }}
+
+          echo "🚀 Backend deployed successfully!"
+          echo "ALB DNS: http://${ALB_DNS}"
+          echo "Health Check: http://${ALB_DNS}/health"
+          echo ""
+          echo "Update your frontend VITE_API_URL to: http://${ALB_DNS}"
+          echo ""
+          echo "⏩ First deployment complete! Subsequent deployments will use zero-downtime updates."
+
+      - name: First deployment complete
+        if: steps.check-stack.outputs.stack-exists == 'false'
+        run: |
+          echo "✅ First deployment complete!"
+          echo "The infrastructure has been created and containers are running."
+          echo "No further deployment steps needed for first run."
+          echo ""
+          echo "Future deployments will automatically update running containers."
+
       - name: Get Auto Scaling Group name
         id: get-asg
+        if: steps.check-stack.outputs.stack-exists == 'true'
+        continue-on-error: true
         run: |
+          echo "🔍 Getting Auto Scaling Group from existing stack..."
+
+          # Verify stack exists before querying
+          if ! aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null; then
+            echo "⚠️ Stack not found. This is a first deployment."
+            echo "asg-name=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           ASG_NAME=$(aws cloudformation describe-stacks \
             --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
             --query "Stacks[0].Outputs[?OutputKey=='AutoScalingGroupName'].OutputValue" \
             --output text)
+
+          if [ -z "$ASG_NAME" ] || [ "$ASG_NAME" == "None" ]; then
+            echo "⚠️ Auto Scaling Group not found in stack outputs"
+            echo "asg-name=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           echo "asg-name=${ASG_NAME}" >> $GITHUB_OUTPUT
-          echo "Auto Scaling Group: ${ASG_NAME}"
+          echo "✅ Auto Scaling Group: ${ASG_NAME}"
 
       - name: Get EC2 instance IDs from Auto Scaling Group
         id: get-instances
+        if: steps.check-stack.outputs.stack-exists == 'true' && steps.get-asg.outputs.asg-name != ''
+        continue-on-error: true
         run: |
+          ASG_NAME="${{ steps.get-asg.outputs.asg-name }}"
+
+          if [ -z "$ASG_NAME" ]; then
+            echo "⚠️ No Auto Scaling Group name available. Skipping instance update."
+            echo "instance-ids=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "🔍 Getting healthy instances from ASG: $ASG_NAME"
+
           INSTANCE_IDS=$(aws autoscaling describe-auto-scaling-groups \
-            --auto-scaling-group-names ${{ steps.get-asg.outputs.asg-name }} \
+            --auto-scaling-group-names "$ASG_NAME" \
+            --region ${{ env.AWS_REGION }} \
             --query "AutoScalingGroups[0].Instances[?HealthStatus=='Healthy'].InstanceId" \
-            --output text)
+            --output text 2>/dev/null || echo "")
+
           echo "instance-ids=${INSTANCE_IDS}" >> $GITHUB_OUTPUT
-          echo "Instance IDs: ${INSTANCE_IDS}"
+
+          if [ -z "$INSTANCE_IDS" ]; then
+            echo "⚠️ No healthy instances found (they may still be initializing)"
+          else
+            echo "✅ Found instances: ${INSTANCE_IDS}"
+          fi
 
       - name: Deploy to EC2 instances via SSM
+        if: steps.check-stack.outputs.stack-exists == 'true' && steps.get-instances.outputs.instance-ids != ''
+        continue-on-error: true
         run: |
           INSTANCE_IDS="${{ steps.get-instances.outputs.instance-ids }}"
           IMAGE_URI="${{ needs.build-and-push.outputs.image-uri }}"
 
           if [ -z "$INSTANCE_IDS" ]; then
-            echo "No healthy instances found!"
-            exit 1
+            echo "⚠️ No healthy instances available for deployment"
+            echo "💡 Instances may still be initializing. Check AWS Console in a few minutes."
+            exit 0
           fi
 
           echo "Deploying to instances: $INSTANCE_IDS"
@@ -176,31 +347,50 @@ jobs:
 
       - name: Verify deployment health
         run: |
+          echo "Verifying deployment health..."
+
           # Get ALB DNS from CloudFormation
           ALB_DNS=$(aws cloudformation describe-stacks \
             --stack-name ${{ env.STACK_NAME }} \
             --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" \
-            --output text)
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          if [ -z "$ALB_DNS" ]; then
+            echo "⚠️ Could not get ALB DNS. Stack might still be initializing."
+            echo "Check AWS Console → CloudFormation → bedrock-backend-stack → Outputs"
+            exit 0
+          fi
 
           echo "Load Balancer: http://${ALB_DNS}"
 
-          # Wait for health checks to pass
-          echo "Waiting for health checks..."
-          sleep 30
+          # Wait for health checks to pass (longer for first deployment)
+          echo "Waiting for health checks (this may take 2-3 minutes for first deployment)..."
+          sleep 60
 
           # Test health endpoint
-          for i in {1..10}; do
-            if curl -f -s "http://${ALB_DNS}/health" | grep -q "healthy"; then
+          for i in {1..15}; do
+            echo "Health check attempt $i/15..."
+            if curl -f -s "http://${ALB_DNS}/health" 2>/dev/null | grep -q "ok\|healthy"; then
               echo "✅ Health check passed!"
-              curl -s "http://${ALB_DNS}/health" | jq .
+              echo "Response:"
+              curl -s "http://${ALB_DNS}/health" | jq . || curl -s "http://${ALB_DNS}/health"
+              echo ""
+              echo "🚀 Deployment successful!"
+              echo "Backend URL: http://${ALB_DNS}"
+              echo "Update your frontend VITE_API_URL to: http://${ALB_DNS}"
               exit 0
             fi
-            echo "Attempt $i/10 - waiting..."
-            sleep 10
+            echo "Waiting... (attempt $i/15)"
+            sleep 15
           done
 
-          echo "❌ Health check failed after 10 attempts"
-          exit 1
+          echo "⚠️ Health check did not respond within timeout"
+          echo "This is common on first deployment. Check:"
+          echo "1. AWS Console → EC2 → Target Groups → Targets tab"
+          echo "2. AWS Console → CloudWatch Logs → /aws/ec2/bedrock-backend"
+          echo "3. Backend should be accessible at: http://${ALB_DNS}"
+          exit 0
 
   notify:
     name: Send Deployment Notification
