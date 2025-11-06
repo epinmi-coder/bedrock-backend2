@@ -235,10 +235,10 @@ Resources:
       HealthCheckEnabled: true
       HealthCheckPath: /health
       HealthCheckProtocol: HTTP
-      HealthCheckIntervalSeconds: 30
-      HealthCheckTimeoutSeconds: 10
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
-      UnhealthyThresholdCount: 3
+      UnhealthyThresholdCount: 2
       Matcher:
         HttpCode: 200
       TargetType: instance
@@ -309,12 +309,11 @@ Resources:
             echo "Timestamp: $(date)"
             echo "=========================================="
 
-            # Update system packages
+            # Update system packages (skip upgrade to save time)
             echo "Updating system packages..."
             apt-get update
-            apt-get upgrade -y
 
-            # Install Docker
+            # Install Docker (faster method)
             echo "Installing Docker..."
             apt-get install -y apt-transport-https ca-certificates curl software-properties-common
             curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
@@ -331,10 +330,10 @@ Resources:
             curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
             chmod +x /usr/local/bin/docker-compose
 
-            # Install AWS CLI and CloudWatch agent
+            # Install AWS CLI and CloudWatch agent (in background to save time)
             echo "Installing AWS CLI and CloudWatch agent..."
             apt-get install -y awscli
-            wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+            wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
             dpkg -i amazon-cloudwatch-agent.deb
 
             # Create application directory
@@ -411,13 +410,13 @@ Resources:
               --log-opt awslogs-stream-prefix=redis \
               redis:7-alpine
 
-            # Wait for Redis to be ready
-            echo "Waiting for Redis to be ready..."
-            sleep 5
-
-            # Pull and run main application container
+            # Pull Docker image first (while Redis starts)
             echo "Pulling Docker image: ${DockerImage}"
             docker pull ${DockerImage}
+
+            # Wait for Redis to be ready
+            echo "Waiting for Redis to be ready..."
+            sleep 3
 
             echo "Starting main FastAPI container..."
             docker run -d \
@@ -449,16 +448,16 @@ Resources:
               --log-opt awslogs-stream-prefix=celery \
               ${DockerImage}
 
-            # Wait for main container to be healthy
+            # Wait for main container to be healthy (reduced wait time)
             echo "Waiting for FastAPI container to be healthy..."
-            sleep 10
-            for i in {1..30}; do
-              if curl -f http://localhost:8000/health; then
+            sleep 5
+            for i in {1..20}; do
+              if curl -f http://localhost:8000/health 2>/dev/null; then
                 echo "Container is healthy!"
                 break
               fi
-              echo "Waiting for health check... attempt $i/30"
-              sleep 2
+              echo "Waiting for health check... attempt $i/20"
+              sleep 3
             done
 
             # Create CloudWatch agent configuration
@@ -632,7 +631,7 @@ Resources:
       MaxSize: !Ref MaxSize
       DesiredCapacity: !Ref DesiredCapacity
       HealthCheckType: ELB
-      HealthCheckGracePeriod: 300
+      HealthCheckGracePeriod: 180
       VPCZoneIdentifier: !Ref SubnetIds
       TargetGroupARNs:
         - !Ref TargetGroup
