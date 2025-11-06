@@ -1,11 +1,30 @@
 # Main FastAPI application with clean lifecycle management
 import sys
-import asyncio
+import locale
 
-# Fix for Windows asyncio event loop compatibility with PostgreSQL
-# MUST be set before any other imports that might use asyncio
+import asyncio
+import selectors
+
+# Force Windows to use SelectorEventLoop for psycopg compatibility
 if sys.platform == "win32":
+    # Use the exact solution suggested by psycopg error message
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # Set UTF-8 encoding for Windows console
+    try:
+        # Set console to UTF-8
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleCP(65001)  # UTF-8 input
+        kernel32.SetConsoleOutputCP(65001)  # UTF-8 output
+    except Exception:
+        pass  # Ignore if it fails
+    
+    # Set locale for proper encoding
+    try:
+        locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+    except Exception:
+        pass  # Ignore if locale not available
 
 import os
 import uvicorn
@@ -14,13 +33,14 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from auth.routes import auth_router
-from chats.routes import chat_router
-from history.routes import history_router
-from db.main import init_db
-from middleware import register_middleware
-from settings import settings
-from logger import setup_logger
+from src.auth.routes import auth_router
+from src.chats.routes import chat_router
+from src.history.routes import history_router
+from src.config_routes.routes import config_router
+from src.db.main import init_db
+from src.middleware import register_middleware
+from src.config import Config as settings
+from src.logger import setup_logger
 
 # Configure logging
 logger = setup_logger(__name__)
@@ -55,29 +75,17 @@ app = FastAPI(
     openapi_url=f"{version_prefix}/openapi.json",
     docs_url=f"{version_prefix}/docs",
     redoc_url=f"{version_prefix}/redoc",
+    lifespan=lifespan
 )
 
 # Register middleware (CORS, logging, trusted hosts)
 register_middleware(app)
 
-# Global exception handler
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """Global exception handler for unhandled errors"""
-    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal server error",
-            "type": "internal_error",
-            "path": str(request.url.path)
-        }
-    )
-
 # Include routers with API v1 prefix
 app.include_router(auth_router, prefix=f"{version_prefix}/auth", tags=["Auth"])
 app.include_router(chat_router, prefix=f"{version_prefix}/chats", tags=["Chat"])
 app.include_router(history_router, prefix=f"{version_prefix}/history", tags=["History"])
+app.include_router(config_router, prefix=f"{version_prefix}/config", tags=["Config"])
 
 # Health check endpoints
 @app.get("/health", tags=["Health"])
@@ -109,12 +117,16 @@ async def root():
     }
 
 if __name__ == "__main__":
-
-    logger.info(f"Starting server on {settings.API_HOST}:{settings.API_PORT}")
-    uvicorn.run(
-        "main:app",
-        host=settings.API_HOST,
-        port=settings.API_PORT,
-        reload=settings.API_RELOAD,
-        log_level="info"
-    )
+    logger.info(f"Starting server on port 8000")
+    
+    # Use proper event loop for Windows psycopg compatibility
+    if sys.platform == "win32":
+        async def run_server():
+            config = uvicorn.Config("main:app", host="127.0.0.1", port=8000, reload=True)
+            server = uvicorn.Server(config)
+            await server.serve()
+        
+        # Run with SelectorEventLoop as suggested by psycopg error
+        asyncio.run(run_server(), loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector()))
+    else:
+        uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

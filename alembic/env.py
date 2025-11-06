@@ -2,6 +2,11 @@ import asyncio
 import sys
 import os
 from logging.config import fileConfig
+from pathlib import Path
+
+# Fix for Windows asyncio event loop compatibility
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
@@ -13,12 +18,12 @@ from sqlmodel import SQLModel
 # Add the parent directory to the path to ensure imports work
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from settings import settings
+# Import configuration
+from src.config import Config as settings
 
 # Import all models to ensure they're registered with SQLModel metadata
 # This is crucial for Alembic auto-detection
-import db  # This will import all models through __init__.py
-from db.models import Chats
+from src.db.models import Chats, User
 
 
 database_url = settings.DATABASE_URL
@@ -96,10 +101,11 @@ async def run_async_migrations() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-
-    import selectors
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(run_async_migrations())
+    try:
+        asyncio.run(run_async_migrations())
+    except Exception as e:
+        print(f"Migration error: {e}")
+        raise
 
 
 if context.is_offline_mode():

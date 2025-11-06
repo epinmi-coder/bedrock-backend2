@@ -1,0 +1,758 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Bedrock Backend - Docker deployment on EC2 with ALB (HTTP only)"
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    Description: Environment name (production, staging, development)
+
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t3.micro
+      - t3.small
+      - t3.medium
+    Description: EC2 instance type (t3.small recommended for running FastAPI + Celery + Redis containers)
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+
+  DockerImage:
+    Type: String
+    Description: Docker image URI from ECR (e.g., 123456789012.dkr.ecr.us-east-1.amazonaws.com/bedrock-backend:latest)
+
+  DatabaseURL:
+    Type: String
+    NoEcho: true
+    Description: PostgreSQL database connection string
+
+  AWSAccessKeyId:
+    Type: String
+    NoEcho: true
+    Description: AWS Access Key ID for Bedrock
+
+  AWSSecretAccessKey:
+    Type: String
+    NoEcho: true
+    Description: AWS Secret Access Key for Bedrock
+
+  JWTSecret:
+    Type: String
+    NoEcho: true
+    Description: JWT secret key for authentication
+
+  FrontendDomain:
+    Type: String
+    Default: "localhost:5173"
+    Description: Frontend domain for email verification links (update later with CloudFront URL)
+
+  MailServer:
+    Type: String
+    Description: SMTP mail server (e.g., smtp.gmail.com)
+
+  MailPort:
+    Type: Number
+    Default: 587
+    Description: SMTP port (587 for TLS, 465 for SSL)
+
+  MailUsername:
+    Type: String
+    Description: Email username for SMTP authentication
+
+  MailPassword:
+    Type: String
+    NoEcho: true
+    Description: Email password for SMTP authentication
+
+  MailFrom:
+    Type: String
+    Description: Sender email address
+
+  MailFromName:
+    Type: String
+    Default: "Security Platform"
+    Description: Sender name for emails
+
+  Domain:
+    Type: String
+    Description: Backend domain (e.g., api.yourdomain.com or ALB DNS)
+
+  MinSize:
+    Type: Number
+    Default: 1
+    Description: Minimum number of EC2 instances
+
+  MaxSize:
+    Type: Number
+    Default: 3
+    Description: Maximum number of EC2 instances
+
+  DesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: Desired number of EC2 instances
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID (use default VPC or existing VPC)
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet IDs for ALB and EC2 instances (select at least 2 in different AZs)
+
+Resources:
+  # ==================== Security Groups ====================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Environment}-bedrock-alb-sg
+      GroupDescription: Security group for Application Load Balancer - HTTP/HTTPS only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Allow HTTP from anywhere
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP from all origins
+        # Allow HTTPS from anywhere (for future SSL setup)
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS from all origins
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-bedrock-alb-sg
+        - Key: Environment
+          Value: !Ref Environment
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Environment}-bedrock-ec2-sg
+      GroupDescription: Security group for EC2 instances running Docker
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Allow traffic from ALB to Docker container port 8000
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow traffic from ALB to Docker port 8000
+        # Allow SSH for maintenance
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: Allow SSH access (restrict this in production!)
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-bedrock-ec2-sg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ==================== IAM Roles ====================
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-bedrock-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/ec2/bedrock-backend*
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub ${Environment}-bedrock-ec2-profile
+      Roles:
+        - !Ref EC2Role
+
+  # ==================== Application Load Balancer ====================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${Environment}-bedrock-alb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref SubnetIds
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-bedrock-alb
+        - Key: Environment
+          Value: !Ref Environment
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${Environment}-bedrock-tg
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      HealthCheckEnabled: true
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200
+      TargetType: instance
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-bedrock-tg
+        - Key: Environment
+          Value: !Ref Environment
+
+  # HTTP Listener (Port 80)
+  ALBListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # HTTPS Listener placeholder (commented out until SSL certificate is available)
+  # ALBListenerHTTPS:
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     LoadBalancerArn: !Ref ApplicationLoadBalancer
+  #     Port: 443
+  #     Protocol: HTTPS
+  #     Certificates:
+  #       - CertificateArn: arn:aws:acm:region:account-id:certificate/certificate-id
+  #     DefaultActions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref TargetGroup
+
+  # ==================== Launch Template ====================
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${Environment}-bedrock-lt
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyPairName
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${Environment}-bedrock-instance
+              - Key: Environment
+                Value: !Ref Environment
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -e
+
+            # Log everything to user-data.log
+            exec > >(tee /var/log/user-data.log)
+            exec 2>&1
+
+            echo "=========================================="
+            echo "Starting Bedrock Backend Setup"
+            echo "Timestamp: $(date)"
+            echo "=========================================="
+
+            # Update system packages
+            echo "Updating system packages..."
+            apt-get update
+            apt-get upgrade -y
+
+            # Install Docker
+            echo "Installing Docker..."
+            apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+            apt-get update
+            apt-get install -y docker-ce docker-ce-cli containerd.io
+
+            # Start Docker service
+            systemctl enable docker
+            systemctl start docker
+
+            # Install Docker Compose
+            echo "Installing Docker Compose..."
+            curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+
+            # Install AWS CLI and CloudWatch agent
+            echo "Installing AWS CLI and CloudWatch agent..."
+            apt-get install -y awscli
+            wget https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+            dpkg -i amazon-cloudwatch-agent.deb
+
+            # Create application directory
+            mkdir -p /opt/bedrock-backend
+            cd /opt/bedrock-backend
+
+            # Login to ECR
+            echo "Logging into Amazon ECR..."
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+            # Create environment file for Docker
+            cat > .env <<EOF
+            # Database
+            DATABASE_URL=${DatabaseURL}
+
+            # AWS Configuration
+            AWS_ACCESS_KEY_ID=${AWSAccessKeyId}
+            AWS_SECRET_ACCESS_KEY=${AWSSecretAccessKey}
+            AWS_DEFAULT_REGION=${AWS::Region}
+            AWS_REGION=${AWS::Region}
+
+            # Authentication
+            JWT_SECRET=${JWTSecret}
+            JWT_ALGORITHM=HS256
+            ENABLE_AUTH=true
+
+            # Redis Configuration (for Celery)
+            REDIS_HOST=redis
+            REDIS_PORT=6379
+            REDIS_URL=redis://redis:6379/0
+
+            # Email Configuration (SMTP)
+            MAIL_SERVER=${MailServer}
+            MAIL_PORT=${MailPort}
+            MAIL_USERNAME=${MailUsername}
+            MAIL_PASSWORD=${MailPassword}
+            MAIL_FROM=${MailFrom}
+            MAIL_FROM_NAME=${MailFromName}
+            MAIL_STARTTLS=true
+            MAIL_SSL_TLS=false
+            USE_CREDENTIALS=true
+            VALIDATE_CERTS=true
+
+            # Domain Configuration
+            DOMAIN=${Domain}
+            FRONTEND_DOMAIN=${FrontendDomain}
+
+            # CORS Configuration - Allow all origins (including localhost frontend)
+            ALLOWED_ORIGINS='["*"]'
+
+            # Environment
+            ENVIRONMENT=${Environment}
+
+            # Bedrock Configuration
+            BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
+            BEDROCK_MAX_TOKENS=4000
+            BEDROCK_TEMPERATURE=0.1
+            EOF
+
+            # Create Docker network for container communication
+            echo "Creating Docker network..."
+            docker network create bedrock-network || true
+
+            # Pull and run Redis container for Celery
+            echo "Starting Redis container..."
+            docker run -d \
+              --name redis \
+              --restart unless-stopped \
+              --network bedrock-network \
+              --log-driver=awslogs \
+              --log-opt awslogs-region=${AWS::Region} \
+              --log-opt awslogs-group=/aws/ec2/bedrock-backend \
+              --log-opt awslogs-create-group=true \
+              --log-opt awslogs-stream-prefix=redis \
+              redis:7-alpine
+
+            # Wait for Redis to be ready
+            echo "Waiting for Redis to be ready..."
+            sleep 5
+
+            # Pull and run main application container
+            echo "Pulling Docker image: ${DockerImage}"
+            docker pull ${DockerImage}
+
+            echo "Starting main FastAPI container..."
+            docker run -d \
+              --name bedrock-backend \
+              --restart unless-stopped \
+              --network bedrock-network \
+              -p 8000:8000 \
+              -e SERVICE_TYPE=api \
+              --env-file .env \
+              --log-driver=awslogs \
+              --log-opt awslogs-region=${AWS::Region} \
+              --log-opt awslogs-group=/aws/ec2/bedrock-backend \
+              --log-opt awslogs-create-group=true \
+              --log-opt awslogs-stream-prefix=fastapi \
+              ${DockerImage}
+
+            # Start Celery worker container for email processing
+            echo "Starting Celery worker container..."
+            docker run -d \
+              --name bedrock-celery-worker \
+              --restart unless-stopped \
+              --network bedrock-network \
+              -e SERVICE_TYPE=celery \
+              --env-file .env \
+              --log-driver=awslogs \
+              --log-opt awslogs-region=${AWS::Region} \
+              --log-opt awslogs-group=/aws/ec2/bedrock-backend \
+              --log-opt awslogs-create-group=true \
+              --log-opt awslogs-stream-prefix=celery \
+              ${DockerImage}
+
+            # Wait for main container to be healthy
+            echo "Waiting for FastAPI container to be healthy..."
+            sleep 10
+            for i in {1..30}; do
+              if curl -f http://localhost:8000/health; then
+                echo "Container is healthy!"
+                break
+              fi
+              echo "Waiting for health check... attempt $i/30"
+              sleep 2
+            done
+
+            # Create CloudWatch agent configuration
+            cat > /opt/aws/amazon-cloudwatch-agent/etc/config.json <<EOF
+            {
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/user-data.log",
+                        "log_group_name": "/aws/ec2/bedrock-backend",
+                        "log_stream_name": "{instance_id}/user-data",
+                        "retention_in_days": 7
+                      }
+                    ]
+                  }
+                }
+              },
+              "metrics": {
+                "namespace": "BedrockBackend",
+                "metrics_collected": {
+                  "cpu": {
+                    "measurement": [
+                      {
+                        "name": "cpu_usage_idle",
+                        "rename": "CPU_IDLE",
+                        "unit": "Percent"
+                      }
+                    ],
+                    "metrics_collection_interval": 60
+                  },
+                  "disk": {
+                    "measurement": [
+                      {
+                        "name": "used_percent",
+                        "rename": "DISK_USED",
+                        "unit": "Percent"
+                      }
+                    ],
+                    "metrics_collection_interval": 60,
+                    "resources": [
+                      "*"
+                    ]
+                  },
+                  "mem": {
+                    "measurement": [
+                      {
+                        "name": "mem_used_percent",
+                        "rename": "MEM_USED",
+                        "unit": "Percent"
+                      }
+                    ],
+                    "metrics_collection_interval": 60
+                  }
+                }
+              }
+            }
+            EOF
+
+            # Start CloudWatch agent
+            /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+              -a fetch-config \
+              -m ec2 \
+              -s \
+              -c file:/opt/aws/amazon-cloudwatch-agent/etc/config.json
+
+            # Create deployment script for GitHub Actions updates
+            cat > /opt/bedrock-backend/deploy.sh <<'DEPLOYEOF'
+            #!/bin/bash
+            set -e
+
+            echo "Starting deployment update..."
+
+            # Get the latest image tag from parameter (passed by GitHub Actions)
+            NEW_IMAGE=$1
+
+            if [ -z "$NEW_IMAGE" ]; then
+              echo "Error: No image specified"
+              exit 1
+            fi
+
+            # Login to ECR
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com
+
+            # Pull new image
+            echo "Pulling new image: $NEW_IMAGE"
+            docker pull $NEW_IMAGE
+
+            # Stop and remove old containers
+            echo "Stopping old containers..."
+            docker stop bedrock-celery-worker || true
+            docker rm bedrock-celery-worker || true
+            docker stop bedrock-backend || true
+            docker rm bedrock-backend || true
+
+            # Start new main container
+            echo "Starting new FastAPI container..."
+            docker run -d \
+              --name bedrock-backend \
+              --restart unless-stopped \
+              --network bedrock-network \
+              -p 8000:8000 \
+              -e SERVICE_TYPE=api \
+              --env-file /opt/bedrock-backend/.env \
+              --log-driver=awslogs \
+              --log-opt awslogs-region=${AWS::Region} \
+              --log-opt awslogs-group=/aws/ec2/bedrock-backend \
+              --log-opt awslogs-create-group=true \
+              --log-opt awslogs-stream-prefix=fastapi \
+              $NEW_IMAGE
+
+            # Start new Celery worker container
+            echo "Starting new Celery worker container..."
+            docker run -d \
+              --name bedrock-celery-worker \
+              --restart unless-stopped \
+              --network bedrock-network \
+              -e SERVICE_TYPE=celery \
+              --env-file /opt/bedrock-backend/.env \
+              --log-driver=awslogs \
+              --log-opt awslogs-region=${AWS::Region} \
+              --log-opt awslogs-group=/aws/ec2/bedrock-backend \
+              --log-opt awslogs-create-group=true \
+              --log-opt awslogs-stream-prefix=celery \
+              $NEW_IMAGE
+
+            # Wait for health check
+            echo "Waiting for health check..."
+            sleep 10
+            for i in {1..30}; do
+              if curl -f http://localhost:8000/health; then
+                echo "Deployment successful!"
+                # Clean up old images
+                docker image prune -f
+                exit 0
+              fi
+              echo "Waiting... attempt $i/30"
+              sleep 2
+            done
+
+            echo "Health check failed!"
+            exit 1
+            DEPLOYEOF
+
+            chmod +x /opt/bedrock-backend/deploy.sh
+
+            echo "=========================================="
+            echo "Bedrock Backend Setup Complete!"
+            echo "Container Status:"
+            docker ps
+            echo ""
+            echo "Services Running:"
+            echo "- FastAPI (Port 8000): bedrock-backend"
+            echo "- Celery Worker: bedrock-celery-worker"
+            echo "- Redis: redis"
+            echo ""
+            echo "Check Celery worker logs:"
+            echo "docker logs bedrock-celery-worker"
+            echo "=========================================="
+
+  # ==================== Auto Scaling Group ====================
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${Environment}-bedrock-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      VPCZoneIdentifier: !Ref SubnetIds
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-bedrock-instance
+          PropagateAtLaunch: true
+        - Key: Environment
+          Value: !Ref Environment
+          PropagateAtLaunch: true
+
+  # ==================== Auto Scaling Policies ====================
+  ScalingPolicyCPU:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 70.0
+
+  # ==================== CloudWatch Log Group ====================
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ec2/bedrock-backend
+      RetentionInDays: 7
+
+  # ==================== CloudWatch Alarms ====================
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-bedrock-high-cpu
+      AlarmDescription: Alert when CPU exceeds 80%
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref AutoScalingGroup
+
+  UnhealthyHostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-bedrock-unhealthy-hosts
+      AlarmDescription: Alert when unhealthy host count is greater than 0
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt TargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+
+  HighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-bedrock-high-memory
+      AlarmDescription: Alert when memory usage exceeds 85%
+      MetricName: MEM_USED
+      Namespace: BedrockBackend
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+
+Outputs:
+  LoadBalancerURL:
+    Description: Application Load Balancer URL (HTTP)
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}
+    Export:
+      Name: !Sub ${Environment}-bedrock-alb-url
+
+  LoadBalancerDNS:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${Environment}-bedrock-alb-dns
+
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub ${Environment}-bedrock-tg-arn
+
+  SecurityGroupId:
+    Description: EC2 Security Group ID
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${Environment}-bedrock-ec2-sg-id
+
+  AutoScalingGroupName:
+    Description: Auto Scaling Group Name
+    Value: !Ref AutoScalingGroup
+    Export:
+      Name: !Sub ${Environment}-bedrock-asg-name
+
+  LogGroupName:
+    Description: CloudWatch Log Group Name
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub ${Environment}-bedrock-log-group
+
+  DeploymentNotes:
+    Description: Important deployment information
+    Value: "Container port 8000 is mapped to ALB port 80. Three containers run: FastAPI (bedrock-backend), Celery worker (bedrock-celery-worker), and Redis. CORS is configured to allow all origins. Update .env file on EC2 for configuration changes. Use deploy.sh script for updates."
+
+  CeleryWorkerInfo:
+    Description: Celery worker information
+    Value: "Celery worker handles email sending asynchronously. Check logs with: docker logs bedrock-celery-worker. Redis runs on internal Docker network."

@@ -2,7 +2,15 @@
 
 **AI-Powered Chat Backend with AWS Bedrock Integration**
 
-A FastAPI-based backend service that leverages Amazon Bedrock to process user queries and return intelligent AI-generated responses. Features full CRUD functionality for chat history management, PostgreSQL database integration, and ChatGPT-style conversation experience.
+# Bedrock Backend API
+
+A high-performance FastAPI backend service that integrates with AWS Bedrock to provide AI-powered security analysis capabilities.
+
+## 🚀 Quick Links
+
+- **[AWS Deployment Guide](AWS_DEPLOYMENT_GUIDE.md)** - Complete guide for deploying to AWS with Docker, CloudFormation, and GitHub Actions
+- **[Deployment Checklist](DEPLOYMENT_CHECKLIST.md)** - Step-by-step checklist for deployment
+- **[Architecture Documentation](ARCHITECTURE.md)** - System architecture and design decisions Features full CRUD functionality for chat history management, PostgreSQL database integration, and ChatGPT-style conversation experience.
 
 ---
 
@@ -190,6 +198,33 @@ GET /api/v1/conversations/{chat_id}
 ---
 
 ## 📦 Installation & Setup
+
+### **🚀 Quick Start - Choose Your Deployment**
+
+#### Option 1: AWS Production Deployment (Docker + CloudFormation)
+
+**Recommended for production environments**
+
+✅ **Complete automated deployment to AWS**  
+✅ **Docker containerized for consistency**  
+✅ **Auto-scaling with load balancer**  
+✅ **CI/CD with GitHub Actions**
+
+👉 **[Follow AWS Deployment Guide](AWS_DEPLOYMENT_GUIDE.md)**  
+👉 **[Use Deployment Checklist](DEPLOYMENT_CHECKLIST.md)**
+
+Quick deploy command:
+
+```powershell
+# After configuring parameters.json
+.\deploy.ps1
+```
+
+---
+
+#### Option 2: Local Development Setup
+
+**For development and testing**
 
 ### **Prerequisites**
 
