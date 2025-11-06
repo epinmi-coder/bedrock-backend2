@@ -168,31 +168,37 @@ jobs:
           echo "Using default VPC and subnets in us-east-2"
           echo "Instance type: t2.micro (Free tier eligible)"
 
+          # Build a parameters JSON file to avoid CLI parsing/quoting issues
+          cat > /tmp/cf-params.json <<'CFPARAMS'
+[
+  {"ParameterKey":"Environment","ParameterValue":"production"},
+  {"ParameterKey":"InstanceType","ParameterValue":"t2.micro"},
+  {"ParameterKey":"KeyPairName","ParameterValue":"${{ secrets.EC2_KEY_PAIR_NAME }}"},
+  {"ParameterKey":"DockerImage","ParameterValue":"${{ needs.build-and-push.outputs.image-uri }}"},
+  {"ParameterKey":"DatabaseURL","ParameterValue":"${{ secrets.DATABASE_URL }}"},
+  {"ParameterKey":"AWSAccessKeyId","ParameterValue":"${{ secrets.AWS_ACCESS_KEY_ID }}"},
+  {"ParameterKey":"AWSSecretAccessKey","ParameterValue":"${{ secrets.AWS_SECRET_ACCESS_KEY }}"},
+  {"ParameterKey":"JWTSecret","ParameterValue":"${{ secrets.JWT_SECRET }}"},
+  {"ParameterKey":"FrontendDomain","ParameterValue":"localhost:5173"},
+  {"ParameterKey":"MailServer","ParameterValue":"${{ secrets.MAIL_SERVER }}"},
+  {"ParameterKey":"MailPort","ParameterValue":"${{ secrets.MAIL_PORT }}"},
+  {"ParameterKey":"MailUsername","ParameterValue":"${{ secrets.MAIL_USERNAME }}"},
+  {"ParameterKey":"MailPassword","ParameterValue":"${{ secrets.MAIL_PASSWORD }}"},
+  {"ParameterKey":"MailFrom","ParameterValue":"${{ secrets.MAIL_FROM }}"},
+  {"ParameterKey":"MailFromName","ParameterValue":"Security Platform"},
+  {"ParameterKey":"Domain","ParameterValue":"TBD"},
+  {"ParameterKey":"VpcId","ParameterValue":"${{ steps.get-vpc.outputs.vpc-id }}"},
+  {"ParameterKey":"SubnetIds","ParameterValue":"${{ steps.get-vpc.outputs.subnet-ids }}"},
+  {"ParameterKey":"MinSize","ParameterValue":"1"},
+  {"ParameterKey":"MaxSize","ParameterValue":"3"},
+  {"ParameterKey":"DesiredCapacity","ParameterValue":"1"}
+]
+CFPARAMS
+
           aws cloudformation create-stack \
             --stack-name ${{ env.STACK_NAME }} \
             --template-body file://cloudformation/bedrock-docker-ec2.yaml \
-            --parameters \
-              ParameterKey=Environment,ParameterValue=production \
-              ParameterKey=InstanceType,ParameterValue=t2.micro \
-              ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
-              ParameterKey=DockerImage,ParameterValue=${{ needs.build-and-push.outputs.image-uri }} \
-              ParameterKey=DatabaseURL,ParameterValue=${{ secrets.DATABASE_URL }} \
-              ParameterKey=AWSAccessKeyId,ParameterValue=${{ secrets.AWS_ACCESS_KEY_ID }} \
-              ParameterKey=AWSSecretAccessKey,ParameterValue=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
-              ParameterKey=JWTSecret,ParameterValue=${{ secrets.JWT_SECRET }} \
-              ParameterKey=FrontendDomain,ParameterValue=localhost:5173 \
-              ParameterKey=MailServer,ParameterValue=${{ secrets.MAIL_SERVER }} \
-              ParameterKey=MailPort,ParameterValue=${{ secrets.MAIL_PORT }} \
-              ParameterKey=MailUsername,ParameterValue=${{ secrets.MAIL_USERNAME }} \
-              ParameterKey=MailPassword,ParameterValue=${{ secrets.MAIL_PASSWORD }} \
-              ParameterKey=MailFrom,ParameterValue=${{ secrets.MAIL_FROM }} \
-              ParameterKey=MailFromName,ParameterValue="Security Platform" \
-              ParameterKey=Domain,ParameterValue=TBD \
-              ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc-id }} \
-              ParameterKey=SubnetIds,ParameterValue=${{ steps.get-vpc.outputs.subnet-ids }} \
-              ParameterKey=MinSize,ParameterValue=1 \
-              ParameterKey=MaxSize,ParameterValue=3 \
-              ParameterKey=DesiredCapacity,ParameterValue=1 \
+            --parameters file:///tmp/cf-params.json \
             --capabilities CAPABILITY_NAMED_IAM \
             --region ${{ env.AWS_REGION }}
 
