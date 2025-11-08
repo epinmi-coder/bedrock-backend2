@@ -766,7 +766,7 @@ Resources:
       MaxSize: !Ref MaxSize
       DesiredCapacity: !Ref DesiredCapacity
       HealthCheckType: ELB
-      HealthCheckGracePeriod: 180
+      HealthCheckGracePeriod: 120  # Reduced from 180s - faster deployment detection
       VPCZoneIdentifier: !Ref SubnetIds
       TargetGroupARNs:
         - !Ref TargetGroup

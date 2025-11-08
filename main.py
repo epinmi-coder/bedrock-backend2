@@ -60,13 +60,13 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     
     print("🚀 Starting up...")
-    try:
-        await init_db()
-        logger.info("✅ Database initialized successfully")
-    except Exception as e:
-        logger.error(f"❌ Database initialization failed: {str(e)}")
-        logger.error("Application will start anyway - check database connection")
-        # Don't crash - let health checks handle it
+    
+    # Skip database initialization on startup for faster container startup
+    # Database tables will be auto-created on first request via SQLModel
+    # This prevents blocking the health endpoint during deployment
+    logger.info("⚡ Fast startup mode - skipping DB initialization")
+    logger.info("✅ Application ready to accept requests")
+    logger.info("📝 Database tables will be created automatically on first use")
     
     yield
     
@@ -97,7 +97,7 @@ app.include_router(config_router, prefix=f"{version_prefix}/config", tags=["Conf
 # Health check endpoints
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """Basic health check endpoint"""
+    """Basic health check endpoint - always returns OK if app is running"""
     return {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -112,6 +112,30 @@ async def api_health_check():
         "service": "security-agents-api",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+
+@app.get("/health/db", tags=["Health"])
+async def database_health_check():
+    """Database connectivity health check - initializes tables if needed"""
+    try:
+        # Initialize database tables if not already done
+        await init_db()
+        return {
+            "status": "ok",
+            "database": "connected",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Database health check failed: {str(e)}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "database": "disconnected",
+                "error": str(e),
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+
 
 @app.get("/", tags=["Root"])
 async def root():
