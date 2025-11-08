@@ -1,0 +1,246 @@
+name: Deploy Infrastructure Only
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "cloudformation/infrastructure-only.yaml"
+      - ".github/workflows/deploy-infrastructure.yml"
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-2
+  STACK_NAME: bedrock-infrastructure-stack
+
+jobs:
+  deploy-infrastructure:
+    name: Deploy CloudFormation Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check if CloudFormation stack exists
+        id: check-stack
+        continue-on-error: true
+        run: |
+          echo "Checking for existing CloudFormation stack..."
+          if aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null; then
+            echo "stack-exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Stack exists, will perform update"
+          else
+            echo "stack-exists=false" >> $GITHUB_OUTPUT
+            echo "📦 Stack does not exist, will create new infrastructure"
+          fi
+
+      - name: Get default VPC and subnets
+        id: get-vpc
+        if: steps.check-stack.outputs.stack-exists == 'false'
+        run: |
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=is-default,Values=true" \
+            --query "Vpcs[0].VpcId" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          echo "vpc-id=${VPC_ID}" >> $GITHUB_OUTPUT
+          echo "✅ Default VPC: ${VPC_ID}"
+
+          SUBNET_IDS=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=${VPC_ID}" \
+            --query "Subnets[0:2].SubnetId" \
+            --output text \
+            --region ${{ env.AWS_REGION }} | tr '\t' ',')
+          echo "subnet-ids=${SUBNET_IDS}" >> $GITHUB_OUTPUT
+          echo "✅ Subnets: ${SUBNET_IDS}"
+
+      - name: Create CloudFormation stack
+        if: steps.check-stack.outputs.stack-exists == 'false'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 Creating Infrastructure Stack"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          aws cloudformation create-stack \
+            --stack-name ${{ env.STACK_NAME }} \
+            --template-body file://cloudformation/infrastructure-only.yaml \
+            --parameters \
+              ParameterKey=Environment,ParameterValue=production \
+              ParameterKey=InstanceType,ParameterValue=t3.medium \
+              ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
+              ParameterKey=VpcId,ParameterValue=${{ steps.get-vpc.outputs.vpc-id }} \
+              ParameterKey=SubnetIds,ParameterValue=\"${{ steps.get-vpc.outputs.subnet-ids }}\" \
+              ParameterKey=MinSize,ParameterValue=1 \
+              ParameterKey=MaxSize,ParameterValue=3 \
+              ParameterKey=DesiredCapacity,ParameterValue=1 \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region ${{ env.AWS_REGION }}
+
+          echo ""
+          echo "⏳ Waiting for stack creation (expected: 3-5 minutes)..."
+
+          aws cloudformation wait stack-create-complete \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+          echo ""
+          echo "✅ Infrastructure stack created successfully!"
+
+      - name: Update CloudFormation stack
+        if: steps.check-stack.outputs.stack-exists == 'true'
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔄 Updating Infrastructure Stack"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          # Get existing parameters
+          VPC_ID=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Parameters[?ParameterKey=='VpcId'].ParameterValue" \
+            --output text)
+
+          SUBNET_IDS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Parameters[?ParameterKey=='SubnetIds'].ParameterValue" \
+            --output text)
+
+          aws cloudformation update-stack \
+            --stack-name ${{ env.STACK_NAME }} \
+            --template-body file://cloudformation/infrastructure-only.yaml \
+            --parameters \
+              ParameterKey=Environment,ParameterValue=production \
+              ParameterKey=InstanceType,ParameterValue=t3.medium \
+              ParameterKey=KeyPairName,ParameterValue=${{ secrets.EC2_KEY_PAIR_NAME }} \
+              ParameterKey=VpcId,ParameterValue=${VPC_ID} \
+              ParameterKey=SubnetIds,ParameterValue=\"${SUBNET_IDS}\" \
+              ParameterKey=MinSize,ParameterValue=1 \
+              ParameterKey=MaxSize,ParameterValue=3 \
+              ParameterKey=DesiredCapacity,ParameterValue=1 \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --region ${{ env.AWS_REGION }} || {
+            # Update might fail if no changes detected
+            echo "⚠️ No changes detected or update failed"
+            exit 0
+          }
+
+          echo ""
+          echo "⏳ Waiting for stack update..."
+
+          aws cloudformation wait stack-update-complete \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} || {
+            echo "⚠️ Stack update completed with warnings or no changes"
+            exit 0
+          }
+
+          echo ""
+          echo "✅ Infrastructure stack updated successfully!"
+
+      - name: Display stack outputs
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📋 Stack Outputs"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
+            --output table
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" \
+            --output text)
+
+          ASG_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='AutoScalingGroupName'].OutputValue" \
+            --output text)
+
+          echo ""
+          echo "🌐 Load Balancer DNS: ${ALB_DNS}"
+          echo "🔧 Auto Scaling Group: ${ASG_NAME}"
+          echo ""
+          echo "📝 Note: EC2 instances are plain Ubuntu - no application deployed yet"
+          echo ""
+
+      - name: Get instance information
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "💻 EC2 Instances"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          ASG_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --query "Stacks[0].Outputs[?OutputKey=='AutoScalingGroupName'].OutputValue" \
+            --output text)
+
+          echo ""
+          echo "Instances in Auto Scaling Group:"
+          aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${ASG_NAME} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'AutoScalingGroups[0].Instances[*].[InstanceId,HealthStatus,LifecycleState]' \
+            --output table
+
+          echo ""
+          echo "To SSH into an instance:"
+          INSTANCE_ID=$(aws autoscaling describe-auto-scaling-groups \
+            --auto-scaling-group-names ${ASG_NAME} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'AutoScalingGroups[0].Instances[0].InstanceId' \
+            --output text)
+
+          if [ ! -z "$INSTANCE_ID" ]; then
+            PUBLIC_IP=$(aws ec2 describe-instances \
+              --instance-ids ${INSTANCE_ID} \
+              --region ${{ env.AWS_REGION }} \
+              --query 'Reservations[0].Instances[0].PublicIpAddress' \
+              --output text)
+            
+            echo "ssh -i /path/to/${{ secrets.EC2_KEY_PAIR_NAME }}.pem ubuntu@${PUBLIC_IP}"
+          fi
+          echo ""
+
+  notify:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure]
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          if [ "${{ needs.deploy-infrastructure.result }}" == "success" ]; then
+            echo "✅ Infrastructure deployment successful!"
+            echo ""
+            echo "🎯 Next Steps:"
+            echo "1. SSH into the EC2 instances to configure application"
+            echo "2. Or create a separate deployment workflow for application updates"
+            echo "3. Or use AWS Systems Manager Session Manager for remote access"
+          else
+            echo "❌ Infrastructure deployment failed!"
+            exit 1
+          fi
