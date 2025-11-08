@@ -240,8 +240,9 @@ jobs:
           ) &
           MONITOR_PID=$!
 
-          # Wait with timeout (max 20 minutes = 1200 seconds)
-          timeout 1200 aws cloudformation wait stack-create-complete \
+          # Wait with timeout (max 30 minutes = 1800 seconds)
+          # EC2 instances need time to: pull images, start containers, pass health checks
+          timeout 1800 aws cloudformation wait stack-create-complete \
             --stack-name ${{ env.STACK_NAME }} \
             --region ${{ env.AWS_REGION }} || {
             EXIT_CODE=$?
@@ -249,16 +250,19 @@ jobs:
             
             echo "⚠️ Stack creation encountered an issue (exit code: $EXIT_CODE)"
             echo ""
-            echo "📋 Recent Stack Events:"
+            echo "📋 Recent Stack Events (last 30):"
             aws cloudformation describe-stack-events \
               --stack-name ${{ env.STACK_NAME }} \
               --region ${{ env.AWS_REGION }} \
-              --max-items 20 \
+              --max-items 30 \
               --query "StackEvents[*].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
               --output table
             
             if [ $EXIT_CODE -eq 124 ]; then
-              echo "❌ Timeout: Stack creation took longer than 20 minutes"
+              echo "❌ Timeout: Stack creation took longer than 30 minutes"
+              echo ""
+              echo "🔍 Check CloudWatch Logs for detailed instance startup logs:"
+              echo "   CloudWatch → Log Groups → /aws/ec2/bedrock-backend → latest stream"
             fi
             
             exit 1
