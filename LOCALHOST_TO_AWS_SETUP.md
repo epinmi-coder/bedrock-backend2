@@ -104,14 +104,6 @@ Edit `parameters.json` and fill in your values:
     "ParameterValue": "your-super-secret-jwt-key-here"
   },
   {
-    "ParameterKey": "AWSAccessKeyId",
-    "ParameterValue": "AKIAIOSFODNN7EXAMPLE"
-  },
-  {
-    "ParameterKey": "AWSSecretAccessKey",
-    "ParameterValue": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-  },
-  {
     "ParameterKey": "FrontendDomain",
     "ParameterValue": "localhost:5173"
   },

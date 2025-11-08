@@ -223,12 +223,49 @@ jobs:
             --capabilities CAPABILITY_NAMED_IAM \
             --region ${{ env.AWS_REGION }}
 
-          echo "Waiting for stack creation to complete (this may take 5-10 minutes)..."
-          aws cloudformation wait stack-create-complete \
-            --stack-name ${{ env.STACK_NAME }} \
-            --region ${{ env.AWS_REGION }}
+          echo "Waiting for stack creation to complete (this may take 8-12 minutes)..."
+          echo "Monitoring stack events for troubleshooting..."
 
-          echo "Stack created successfully!"
+          # Start background monitoring of stack events
+          (
+            while true; do
+              aws cloudformation describe-stack-events \
+                --stack-name ${{ env.STACK_NAME }} \
+                --region ${{ env.AWS_REGION }} \
+                --max-items 5 \
+                --query "StackEvents[?ResourceStatus=='CREATE_FAILED' || ResourceStatus=='UPDATE_FAILED'].[LogicalResourceId,ResourceStatusReason]" \
+                --output text 2>/dev/null || true
+              sleep 30
+            done
+          ) &
+          MONITOR_PID=$!
+
+          # Wait with timeout (max 20 minutes = 1200 seconds)
+          timeout 1200 aws cloudformation wait stack-create-complete \
+            --stack-name ${{ env.STACK_NAME }} \
+            --region ${{ env.AWS_REGION }} || {
+            EXIT_CODE=$?
+            kill $MONITOR_PID 2>/dev/null || true
+            
+            echo "⚠️ Stack creation encountered an issue (exit code: $EXIT_CODE)"
+            echo ""
+            echo "📋 Recent Stack Events:"
+            aws cloudformation describe-stack-events \
+              --stack-name ${{ env.STACK_NAME }} \
+              --region ${{ env.AWS_REGION }} \
+              --max-items 20 \
+              --query "StackEvents[*].[Timestamp,LogicalResourceId,ResourceStatus,ResourceStatusReason]" \
+              --output table
+            
+            if [ $EXIT_CODE -eq 124 ]; then
+              echo "❌ Timeout: Stack creation took longer than 20 minutes"
+            fi
+            
+            exit 1
+          }
+
+          # Stop monitoring
+          kill $MONITOR_PID 2>/dev/null || true          echo "Stack created successfully!"
 
           # Get and display ALB DNS
           ALB_DNS=$(aws cloudformation describe-stacks \
@@ -318,7 +355,7 @@ jobs:
 
       - name: Deploy to EC2 instances via SSM
         if: steps.check-stack.outputs.stack-exists == 'true' && steps.get-instances.outputs.instance-ids != ''
-        continue-on-error: true
+        continue-on-error: false
         run: |
           INSTANCE_IDS="${{ steps.get-instances.outputs.instance-ids }}"
           IMAGE_URI="${{ needs.build-and-push.outputs.image-uri }}"
@@ -329,10 +366,14 @@ jobs:
             exit 0
           fi
 
-          echo "Deploying to instances: $INSTANCE_IDS"
+          echo "🚀 Deploying to instances: $INSTANCE_IDS"
+          echo "📦 Image: $IMAGE_URI"
 
           for INSTANCE_ID in $INSTANCE_IDS; do
-            echo "Deploying to instance: $INSTANCE_ID"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📍 Deploying to instance: $INSTANCE_ID"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
             
             COMMAND_ID=$(aws ssm send-command \
               --instance-ids $INSTANCE_ID \
@@ -340,9 +381,11 @@ jobs:
               --parameters "commands=['/opt/bedrock-backend/deploy.sh $IMAGE_URI']" \
               --timeout-seconds 600 \
               --query "Command.CommandId" \
-              --output text)
+              --output text \
+              --region ${{ env.AWS_REGION }})
             
-            echo "Command ID: $COMMAND_ID"
+            echo "📝 SSM Command ID: $COMMAND_ID"
+            echo "⏳ Waiting for deployment to complete (max 10 minutes)..."
             
             # Wait for command to complete
             aws ssm wait command-executed \
@@ -350,31 +393,61 @@ jobs:
               --instance-id $INSTANCE_ID \
               --region ${{ env.AWS_REGION }}
             
-            # Get command output
+            # Get command status and output
             STATUS=$(aws ssm get-command-invocation \
               --command-id $COMMAND_ID \
               --instance-id $INSTANCE_ID \
               --query "Status" \
-              --output text)
+              --output text \
+              --region ${{ env.AWS_REGION }})
             
-            echo "Deployment status for $INSTANCE_ID: $STATUS"
+            echo ""
+            echo "📊 Deployment Status: $STATUS"
             
-            if [ "$STATUS" != "Success" ]; then
-              echo "Deployment failed for instance $INSTANCE_ID"
+            if [ "$STATUS" == "Success" ]; then
+              echo "✅ Deployment successful for $INSTANCE_ID"
+              
+              # Show deployment output
+              echo ""
+              echo "📄 Deployment Output:"
+              aws ssm get-command-invocation \
+                --command-id $COMMAND_ID \
+                --instance-id $INSTANCE_ID \
+                --query "StandardOutputContent" \
+                --output text \
+                --region ${{ env.AWS_REGION }} | tail -20
+            else
+              echo "❌ Deployment failed for instance $INSTANCE_ID"
+              echo ""
+              echo "📄 Error Output:"
               aws ssm get-command-invocation \
                 --command-id $COMMAND_ID \
                 --instance-id $INSTANCE_ID \
                 --query "StandardErrorContent" \
-                --output text
+                --output text \
+                --region ${{ env.AWS_REGION }}
+              echo ""
+              echo "📄 Standard Output:"
+              aws ssm get-command-invocation \
+                --command-id $COMMAND_ID \
+                --instance-id $INSTANCE_ID \
+                --query "StandardOutputContent" \
+                --output text \
+                --region ${{ env.AWS_REGION }}
               exit 1
             fi
           done
 
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "✅ Deployment successful to all instances!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: Verify deployment health
         run: |
-          echo "Verifying deployment health..."
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🏥 Verifying Deployment Health"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
           # Get ALB DNS from CloudFormation
           ALB_DNS=$(aws cloudformation describe-stacks \
@@ -384,39 +457,67 @@ jobs:
             --region ${{ env.AWS_REGION }})
 
           if [ -z "$ALB_DNS" ]; then
-            echo "⚠️ Could not get ALB DNS. Stack might still be initializing."
-            echo "Check AWS Console → CloudFormation → bedrock-backend-stack → Outputs"
+            echo "⚠️ Could not retrieve ALB DNS from CloudFormation stack"
+            echo "📝 Check AWS Console → CloudFormation → ${{ env.STACK_NAME }} → Outputs"
             exit 0
           fi
 
-          echo "Load Balancer: http://${ALB_DNS}"
+          echo "🌐 Load Balancer DNS: $ALB_DNS"
+          echo "🔗 Backend URL: http://${ALB_DNS}"
+          echo ""
 
-          # Wait for health checks to pass (longer for first deployment)
-          echo "Waiting for health checks (this may take 2-3 minutes for first deployment)..."
-          sleep 60
+          # Wait for target groups to be healthy (first deployment)
+          echo "⏳ Waiting for health checks to stabilize (90 seconds)..."
+          sleep 90
 
-          # Test health endpoint
-          for i in {1..15}; do
-            echo "Health check attempt $i/15..."
-            if curl -f -s "http://${ALB_DNS}/health" 2>/dev/null | grep -q "ok\|healthy"; then
-              echo "✅ Health check passed!"
-              echo "Response:"
-              curl -s "http://${ALB_DNS}/health" | jq . || curl -s "http://${ALB_DNS}/health"
+          # Comprehensive health check
+          echo "🔍 Testing health endpoint..."
+          HEALTH_ATTEMPTS=0
+          MAX_HEALTH_ATTEMPTS=15
+
+          while [ $HEALTH_ATTEMPTS -lt $MAX_HEALTH_ATTEMPTS ]; do
+            HEALTH_ATTEMPTS=$((HEALTH_ATTEMPTS + 1))
+            echo "🏥 Health check attempt $HEALTH_ATTEMPTS/$MAX_HEALTH_ATTEMPTS..."
+            
+            if RESPONSE=$(curl -f -s --max-time 10 "http://${ALB_DNS}/health" 2>&1); then
+              echo "✅ Health check PASSED!"
               echo ""
-              echo "🚀 Deployment successful!"
-              echo "Backend URL: http://${ALB_DNS}"
-              echo "Update your frontend VITE_API_URL to: http://${ALB_DNS}"
+              echo "📄 Health Response:"
+              echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
+              echo ""
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "🎉 DEPLOYMENT SUCCESSFUL!"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo ""
+              echo "📌 Backend URL: http://${ALB_DNS}"
+              echo "📌 Health Endpoint: http://${ALB_DNS}/health"
+              echo "📌 API Docs: http://${ALB_DNS}/api/v1/docs"
+              echo ""
+              echo "🔄 Update your frontend VITE_API_URL to:"
+              echo "   http://${ALB_DNS}"
+              echo ""
               exit 0
             fi
-            echo "Waiting... (attempt $i/15)"
+            
+            echo "⏳ Waiting (attempt $HEALTH_ATTEMPTS/$MAX_HEALTH_ATTEMPTS)..."
             sleep 15
           done
 
-          echo "⚠️ Health check did not respond within timeout"
-          echo "This is common on first deployment. Check:"
-          echo "1. AWS Console → EC2 → Target Groups → Targets tab"
-          echo "2. AWS Console → CloudWatch Logs → /aws/ec2/bedrock-backend"
-          echo "3. Backend should be accessible at: http://${ALB_DNS}"
+          echo ""
+          echo "⚠️ Health check did not pass within the timeout period"
+          echo ""
+          echo "📋 Troubleshooting Information:"
+          echo "1. Check Target Group health in AWS Console:"
+          echo "   EC2 → Target Groups → ${{ env.STACK_NAME }}"
+          echo ""
+          echo "2. Check CloudWatch Logs:"
+          echo "   CloudWatch → Log Groups → /aws/ec2/bedrock-backend"
+          echo ""
+          echo "3. The backend should still be accessible at:"
+          echo "   http://${ALB_DNS}"
+          echo ""
+          echo "Note: First deployments may take 3-5 minutes for targets to become healthy"
+          echo ""
           exit 0
 
   notify:

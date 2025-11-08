@@ -59,10 +59,17 @@ async def lifespan(app: FastAPI):
     logger.info("Configuration Status:")
     logger.info("=" * 60)
     
-
     print("🚀 Starting up...")
-    await init_db()
+    try:
+        await init_db()
+        logger.info("✅ Database initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {str(e)}")
+        logger.error("Application will start anyway - check database connection")
+        # Don't crash - let health checks handle it
+    
     yield
+    
     print("🛑 Shutting down...")
  
 

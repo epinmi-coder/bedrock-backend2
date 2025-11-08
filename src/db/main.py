@@ -53,8 +53,21 @@ SessionLocal = async_sessionmaker(
 logger.info("Async session factory configured")
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+    """Initialize database tables with timeout protection"""
+    try:
+        logger.info("Initializing database tables...")
+        # Add timeout to prevent indefinite hanging
+        async with asyncio.timeout(30):  # 30 second timeout
+            async with engine.begin() as conn:
+                await conn.run_sync(SQLModel.metadata.create_all)
+        logger.info("Database tables initialized successfully")
+    except asyncio.TimeoutError:
+        logger.error("Database initialization timed out after 30 seconds")
+        logger.error("This usually means the database is unreachable or slow")
+        raise
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {str(e)}", exc_info=True)
+        raise
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
